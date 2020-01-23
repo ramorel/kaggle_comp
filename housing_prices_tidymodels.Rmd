@@ -1,0 +1,145 @@
+---
+title: "Regression Techniques with Tidymodels"
+author: "Richard Paquin Morel"
+date: "1/22/2020"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 3
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## A tidy approach to modeling housig prices
+
+
+```{r warning=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(janitor)
+```
+
+## Including Plots
+
+```{r message = FALSE}
+train <- read_csv("train.csv") %>% clean_names() %>% select(-id)
+test <- read_csv("test.csv") %>% clean_names()
+ids <- test %>% pull(id)
+test <- test %>% select(-id) 
+y <- train$sale_price
+```
+
+## Data 
+
+```{r}
+train %>% glimpse()
+```
+
+```{r}
+train <- train %>% select(-sale_price)
+```
+
+## Variables were NA means "None"
+```{r}
+none_vars <-
+  c(
+    "bsmt_cond",
+    "bsmt_qual",
+    "bsmt_exposure",
+    "bsmt_fin_type1",
+    "bsmt_fin_type2",
+    "mas_vnr_type",
+    "garage_type",
+    "garage_finish",
+    "garage_qual",
+    "garage_cond",
+    "alley",
+    "fence",
+    "fireplace_qu",
+    "misc_feature",
+    "pool_qc"
+  )
+
+zero_vars <-
+  c(
+    "mas_vnr_area",
+    "bsmt_fin_sf1",
+    "bsmt_fin_sf2",
+    "bsmt_full_bath",
+    "bsmt_half_bath",
+    "bsmt_unf_sf",
+    "total_bsmt_sf",
+    "garage_area",
+    "garage_cars",
+    "garage_yr_blt"
+  )
+
+train <- 
+  train %>% 
+  mutate_at(vars(none_vars), ~ if_else(is.na(.), "None", .)) %>% 
+  mutate_at(vars(zero_vars), ~ if_else(is.na(.), 0, .))
+
+test <- 
+  test %>% 
+  mutate_at(vars(none_vars), ~ if_else(is.na(.), "None", .)) %>% 
+  mutate_at(vars(zero_vars), ~ if_else(is.na(.), 0, .))
+```
+
+```{r}
+unknown_vars <- 
+  c("ms_zoning",
+    "electrical",
+    "exterior1st",
+    "exterior2nd",
+    "functional",
+    "kitchen_qual",
+    "ms_zoning",
+    "sale_type",
+    "utilities"
+    )
+
+prep_rec <-
+  recipe(~ ., data = train) %>% 
+  step_modeimpute(
+    ms_zoning,
+    electrical,
+    exterior1st,
+    exterior2nd,
+    functional,
+    kitchen_qual,
+    ms_zoning,
+    sale_type,
+    utilities
+  ) %>% 
+  step_medianimpute(lot_frontage) %>% 
+  step_mutate(
+    total_sf = total_bsmt_sf + x1st_flr_sf + x2nd_flr_sf,
+    total_baths = bsmt_full_bath + (bsmt_half_bath * 0.5) + full_bath + (half_bath * 0.5),
+    age = yr_sold - year_built,
+    new = if_else(year_built > 2005, 1, 0),
+    remodeled = if_else(year_remod_add > year_built, 1, 0),
+    outside_area = open_porch_sf + x3ssn_porch + wood_deck_sf + screen_porch + enclosed_porch,
+    overall_rating = overall_cond + overall_qual
+  ) %>% 
+  step_dummy(all_nominal(), one_hot = TRUE) %>%
+  step_BoxCox(all_numeric()) %>% 
+  step_scale(all_numeric()) %>% 
+  step_center(all_numeric()) %>% 
+  prep(training = train, retain = TRUE)
+
+test_dat <- bake(prep_rec, test)
+train_dat <- juice(prep_rec)
+```
+
+```{r}
+train_dat <-
+  train_dat %>% 
+  mutate(sale_price = log10(y))
+model <- 
+  linear_reg(penalty = 1, mixture = 1) %>% 
+  set_engine("glmnet")
+```
+
