@@ -1,0 +1,504 @@
+---
+title: "Preprocessing, tuning, and modeling with Tidymodels"
+author: "Richard Paquin Morel"
+date: "1/22/2020"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# A tidy approach to modeling housig prices
+
+The basic purpose of this notebook is to demonstrate how to use the [`tidymodels`](https://github.com/tidymodels) suite of packages to conduct a predictive analysis. Also: to give me the opportunity to learn to use the tidymodels tools. `tidymodels` is a meta-package comprised of a series of packages meant to be used together with a consistent API. Each of the packages within `tidymodels` has a specific use in the modeling processes--preprocessing data, resampling, modeling, predicting, etc. At another level, the packages collective seek to "clean up" some of the syntax messiness endemic to programming languages like R. Since many, many people contribute to the development of packages, there is no necessary consistency between packages. For example, for statistical modeling, some packages use the formula interface, while others use the "X, y" interface. What is fun about this is that not only are they different, in the former, your outcome variable comes first and in the latter, second. 
+
+Also, there are often several packages that will implement a specific method--like random forests or neural networks. These different packages will have ever-so-slightly different terms for the model's parameters--e.g., `trees` versus `ntrees`. So a `tidymodels` package like `parsnip` aims to create a consistent API and consistent set of parameter terms that interfaces with a variety of packages. This makes is simple to switch from different implemetation of an algorithm without diving back into the help file again and again.
+
+In this notebook, I will do as much of the preprocessing, modeling, and predicting within `tidymodels` as possible. There are a few instances where `tidymodels` is not yet ready to deal with certain preprocessing routines--or I just don't know how to implement them. I will keep the EDA to a minimum--there are plenty of notebooks on Kaggle that go deep into EDA with the Ames data. The main focus here is on the `tidymodels` approach to analysis.
+
+```{r warning=FALSE, message=FALSE}
+library(tidyverse)
+library(tidymodels)
+library(tune)
+library(janitor)
+library(patchwork)
+
+theme_set(
+  theme_minimal() +
+    theme(axis.title.x = element_text(size = 12, hjust = 1),
+          axis.title.y = element_text(size = 12),
+          axis.text.x = element_text(size = 10),
+          axis.text.y = element_text(size = 10),
+          plot.title = element_text(size = 12, colour = "grey25", face = "bold"), 
+          plot.subtitle = element_text(size = 11, colour = "grey44"))
+  )
+```
+
+# Import data
+
+```{r message = FALSE}
+train <- read_csv("train.csv") %>% clean_names() %>% select(-id)
+test <- read_csv("test.csv") %>% clean_names()
+
+# Keep IDs for submission
+ids <- test %>% pull(id)
+test <- test %>% select(-id) 
+
+# Keep outcome variable
+y <- train$sale_price
+```
+
+# Data exploration 
+
+As I said, I will do very little data exploration here. Just highlight some main points. First, I always take a `glimpse` at the data.
+```{r}
+# What does the data look like?
+train %>% glimpse()
+```
+
+Always necessary to examine the outcome variable--`sale_price`. It is skewed, unsurprisingly, so I take the log to normalize it.
+```{r}
+# Examining the outcome variable
+p1 <- train %>% 
+  ggplot(aes(x = sale_price)) +
+  geom_histogram(aes(x = sale_price, stat(density)),
+                 bins = 100,
+                 fill = "cornflowerblue", 
+                 alpha = 0.7) + 
+  geom_density() +
+  scale_x_continuous(breaks= seq(0, 800000, by=100000), labels = scales::comma) +
+  labs(x = "Sale Price", y = "", title = "Density of Sale Price")
+
+p2 <- train %>% 
+  ggplot() +
+  geom_histogram(aes(x = log10(sale_price), stat(density)),
+                 bins = 100,
+                 fill = "cornflowerblue", 
+                 alpha = 0.7) + 
+  geom_density(aes(x = log10(sale_price))) +
+  labs(x = "Log10 of Sale Price", y = "", title = "Density of Logged Sale Price")
+
+p1 + p2
+```
+
+Knowing the domain, it also seems obvious that the size of the house correlates strongly with the sale price. (It may seem obvious, but always necessary to check. Assumptions and domain-specific knowledge can serve as a guide, but must be thoroughly examined in the EDA process.) There are a couple of clear outliers that we should drop. I plan to use linear modeling, which is sensitive to outliers. 
+```{r}
+p1 <- train %>% 
+  ggplot(aes(x = gr_liv_area, y = sale_price)) +
+  geom_point(color = "cornflowerblue", alpha = 0.75) +
+  scale_y_continuous(breaks= seq(0, 800000, by=200000), labels = scales::comma) +
+  labs(x = "Above ground living area", y = "Sale Price", title = "Sale Price by Above Ground Living Area")
+
+p2 <- train %>% 
+  ggplot(aes(x = gr_liv_area, y = log10(sale_price))) +
+  geom_point(color = "cornflowerblue", alpha = 0.75) +
+  labs(x = "Above ground living area", y = "Log of Sale Price", title = "Logged Sale Price by Above Ground Living Area")
+
+p1 + p2  
+
+# Drop those outliers!
+train <-
+  train %>% 
+  filter(
+    !(gr_liv_area > 4000 & sale_price < 200000)
+  )
+```
+
+
+# Data Preprocessing with `recipies`
+
+I will do almost all of the preprocess using the [`recipes` package](https://tidymodels.github.io/recipes). The idea behind `recipes` is to set a consistent API using piping for the preprocessing of data. You create a receipe consisting of _steps_, each of which does a discrete piece of preprocessing, and then apply that recipe to your training and testing data. This is advantageous, because it will processes both the training and testing data _using parameters derived from the respective dataset_. That is, if you center and scale the data, you need to do this _separately_ for the training and testing data. If you combine the two datasets (which is often done so that both are processed at the same time) and center and scale the data collective, this can lead to over-optimistic validation. So it is great that we can specify a recipe and apply it separately and easily to the training and testing data.
+
+`recipes` uses the power of `dplyr` to carry out data manipulations. **However**, it is not a one-to-one match with `dplyr`. So there are some manipulations that I want to do that I can't get to work in `recipes`. It seems like
+
+```{r}
+train <-
+  train %>% 
+  group_by(neighborhood) %>% 
+  mutate(median_sp = median(sale_price)) %>% 
+  ungroup() %>% 
+  mutate(wealth = 
+           case_when(
+             median_sp > quantile(median_sp, 0.8) ~ 2, 
+             between(median_sp, quantile(median_sp, 0.2),  quantile(median_sp, 0.8)) ~ 1,
+             median_sp < quantile(median_sp, 0.2) ~ 0)) %>% 
+  select(-median_sp )
+
+neighborhoods <- train %>% select(neighborhood, wealth) %>% distinct()
+
+test <-
+  test %>% 
+  left_join(neighborhoods)
+```
+
+
+## Impute lot frontage based on simple regression (this is probably over kill)
+```{r}
+lm_fit_train <- lm(lot_frontage ~ log(lot_area+1) + neighborhood, data = train)
+lm_fit_test <- lm(lot_frontage ~ log(lot_area+1) + neighborhood, data = train)
+
+train$lot_frontage[is.na(train$lot_frontage)] <- predict(lm_fit_train, train)[is.na(train[["lot_frontage"]])]
+test$lot_frontage[is.na(test$lot_frontage)] <- predict(lm_fit_test, test)[is.na(test[["lot_frontage"]])]
+```
+
+
+## Build a pipleine with `recipes` to preprocess data
+
+Before I create the pipeline, I will define some of the variables that I want to process is different ways. For some of the variables with missing observations, `NA` indicates that the home lacks that feature. So `NA == None`. I call these `none_vars`. There are some continuous variables associated with those missing features. In these cases `NA == 0`. I call these `zero_vars`. There are some variables that are ordinal--in other words, there is meaning in order of the categories. A house in _poor_ condition is worse than a house in _typical_ condition. We want to preserve that meaning in the analysis. These variables are those that contain the strings "qual", "cond", or "qc". I call these `ordinal vars`. Finally, some variables have skewed distributions. I want to normalize those with a transformation. I call these `skewed vars`. 
+```{r}
+none_vars <-
+  c(
+    "bsmt_cond",
+    "bsmt_qual",
+    "bsmt_exposure",
+    "bsmt_fin_type1",
+    "bsmt_fin_type2",
+    "mas_vnr_type",
+    "garage_type",
+    "garage_finish",
+    "garage_qual",
+    "garage_cond",
+    "alley",
+    "fence",
+    "fireplace_qu",
+    "misc_feature",
+    "pool_qc"
+  )
+
+zero_vars <-
+  c(
+    "mas_vnr_area",
+    "bsmt_fin_sf1",
+    "bsmt_fin_sf2",
+    "bsmt_full_bath",
+    "bsmt_half_bath",
+    "bsmt_unf_sf",
+    "total_bsmt_sf",
+    "garage_area",
+    "garage_cars",
+    "garage_yr_blt"
+  )
+
+ordinal_vars <-
+  train %>% 
+  select_if(is.character) %>% 
+  select(matches("qc|qual|cond$")) %>% 
+  names
+
+skewed_vars <-
+  map_dbl(
+    train %>% select_if(is.numeric), 
+    moments::skewness, na.rm = TRUE) %>% 
+  .[. > 0.75] %>%
+  names()
+```
+
+Because `recipes` uses the power of `dplyr` and `rlang`, we can use the helper functions (`contains()`, `starts_with()`, etc.) to select groups of variables. We can also pass bare `names` rather than quoted `"names"`. And we can use `-` to exclude variables. We can also send groups of variables contained in vector objects in the environment. Hence: `none_vars`, etc.
+
+First we define the `recipe`. This is the specification of the model we want to estimate. Using the formula syntax, we ultimately want to regress sale_price on all the variables in the data--so: `sale_price ~ .`. We add a `data` argument that points to our training data. This should be familiar to anyone who has every used `lm`. After specifying the model, we then articulate each "step" in the preprocessing pipeline. I explain each of these in comments in the code, but here's a quick overview:
+
+ - Deal with missing observations
+ - Encode variables 
+ - Feature engineering
+ - Normalize predictors
+ - Scale and center 
+ - Normalize outcome
+ - "Prep" the recipe so that it is ready to be applied to new data
+
+We "train" the recipe with a specific dataset--the training data that we are using. We then apply it to the testing data so that it has the same form as the training data.
+
+``` {r}
+prep_rec <-
+  recipe(sale_price ~ ., data = train) %>% 
+  
+  # Impute the mode for categorical variables  
+  step_modeimpute(
+    ms_zoning,
+    electrical,
+    exterior1st,
+    exterior2nd,
+    functional,
+    sale_type,
+    utilities,
+    kitchen_qual
+    ) %>%
+  
+  # recipes seems to convert character strings to factors automatically, so need to convert back to deal with missing observations
+  step_factor2string(none_vars) %>%  
+  
+  # Now, replace the missing observations with "none" for the none_vars
+  step_mutate_at(none_vars, fn = ~ replace_na(., "None")) %>% 
+  
+  # Convert back
+  step_string2factor(none_vars) %>% 
+  
+  # Replace the missing observations with 0 for the zero vars
+  step_mutate_at(zero_vars, fn = ~ replace_na(., 0)) %>% 
+  
+  # Create an "others" category for neighborhood, since there are some that only have a few sales
+  step_other(neighborhood, threshold = 10) %>% 
+  
+  # Recode ordinal variables
+  step_mutate_at(
+    ordinal_vars, fn = ~ factor(., levels = c("None", "Po", "Fa", "TA", "Gd", "Ex"), ordered = TRUE)
+  ) %>% 
+  
+  # Create new variables 
+  step_mutate(
+    total_sf = total_bsmt_sf + x1st_flr_sf + x2nd_flr_sf,
+    avg_rm_sf = gr_liv_area / tot_rms_abv_grd,
+    total_baths = bsmt_full_bath + (bsmt_half_bath * 0.5) + full_bath + (half_bath * 0.5),
+    age = yr_sold - year_built,
+    new = if_else(yr_sold == year_built, 1, 0),
+    old = if_else(year_built < 1940, 1, 0),
+    pool = if_else(pool_area > 0, 1, 0),
+    basement = if_else(total_bsmt_sf > 0, 1, 0),
+    garage = if_else(garage_area > 0, 1, 0),
+    remodeled = if_else(year_remod_add > year_built, 1, 0),
+    porch_area = open_porch_sf + x3ssn_porch + wood_deck_sf + screen_porch + enclosed_porch,
+    overall_rating = overall_cond + overall_qual
+    ) %>% 
+  
+  # Add a quadratic term
+  step_mutate(
+    total_sf2 = total_sf^2,
+    avg_rm_sf2 = avg_rm_sf^2,
+    age2 = age^2
+    ) %>% 
+  
+  # One-hot encoding of categorical variables
+  step_dummy(all_nominal(), -ordinal_vars, one_hot = TRUE) %>%
+
+  # Add an interaction
+  step_interact(~ starts_with("central_air"):age) %>% 
+  
+  # Normalize the skewed variables
+  step_BoxCox(skewed_vars, -sale_price) %>% 
+  
+  # Center and scale the variales
+  step_normalize(all_numeric(), -sale_price) %>% 
+  
+  # Encode the factors so that they are numeric
+  step_ordinalscore(ordinal_vars) %>% 
+  
+  # Normalize the outcome variable
+  step_log(sale_price) %>% 
+  
+  # Remove sparse variables
+  step_nzv(all_predictors()) %>% 
+  
+  # It is necessary to prep the recipe before using it on a new dataset
+  prep(retain = TRUE)
+```
+
+Now that the recipe is defined, we apply it to our training and testing data. There are two functions that accomplish this. Use `juice` to extract the training data that we used to train the steps in the recipe. The `bake` function, on the other hand, we use to process a new dataset--typically the test data. Taking a quick look at the training dataframe, looks like recipe accomplished the preprocessing we desired.
+
+```{r}
+set.seed(1491)
+
+train_dat <- juice(prep_rec) 
+test_dat <- bake(prep_rec, test) %>% select(-sale_price)
+
+print(train_dat)
+```
+
+Next, using the `rsample` package, we can split our training data for cross-validation. 
+```{r}
+train_split <- initial_split(train_dat, prob = 0.7)
+train_cv <- training(train_split) %>% vfold_cv(v = 5)
+```
+
+# Hyperparameter search and modeling with `dials`, `tune`, `yardstick`, and `parsnip`
+
+Now that the data are preprocessed, we can begin modeling. I will specify several models and conduct a hyperparameter tuning for each. To do this we use `parsnip` for the modeling and `tune` and `dials` for the tuning. `tune` provides some useful functions to defining the space over which we conduct the hyperparameter tuning and easily accommodates cross-validation. `dials` provides useful functions for defining parameters for the models that we will use. So tuning functions come from `tune` (e.g., `tune` and `tune_grid`) and the parameter fuctions come from `dials` (e.g., `penalty`, `trees`). We then specify the model, set an "engine" (e.g., the package that will implement the model), fit, and predict with `parsnip`. Finally, we use metrics from `yardstick` to evaluate the model.
+
+Let's take this one step at a time. I will start with a lasso regression.
+
+## Lasso Model
+
+First, we specify the model and the parameters. For lasso, we use `linear_reg` with the parameters `penalty` and `mixture`. Since this is lasso, we will tune L2 and set L1 to 1. So rather than supply a value to the `penalty` argument, we supple the function `tune()`. This tells `tune_grid` that we are sending it a set of values. We then set the engine--i.e., tell `parsnip` which package to call up to estimate the parameters. Note that we can use different packages, which almost certainly have different names for the parameter arguments, but maintain the same set of arguments. Rather than `glmnet`, we could use `spark` or `keras` and only change the name package in the `set_engine` function!
+```{r}
+lasso_model <- 
+    linear_reg(
+        penalty = tune(), 
+        mixture = 1) %>% 
+    set_engine("glmnet",
+               standardize = FALSE)
+
+print(lasso_model)
+```
+
+
+
+```{r}
+alphas <- grid_regular(penalty(), levels = 50)
+
+lasso_cv <- 
+    tune_grid(
+        formula   = sale_price ~ .,
+        model     = lasso_model,
+        resamples = train_cv,
+        grid      = alphas,
+        metrics   = metric_set(rmse),
+        control   = control_grid(verbose = FALSE)
+    )
+
+best_lasso <- 
+    lasso_cv %>% 
+    select_best("rmse", maximize = FALSE)
+
+print(best_lasso)
+
+lasso_fit <- 
+    lasso_model %>% 
+    finalize_model(parameters = best_lasso) %>% 
+    fit(sale_price ~ ., training(train_split))
+
+lasso_predictions <- 
+    testing(train_split) %>%
+    select(sale_price) %>%
+    bind_cols(
+        predict(lasso_fit, testing(train_split))
+    )
+
+print(rmse(lasso_predictions , sale_price, .pred))
+```
+
+## XGBoost Model
+```{r}
+set.seed(1491)
+# xgb_grid <-
+#   grid_random(
+#     trees(), # nrounds
+#     learn_rate(), # eta
+#     min_n(), # min_child_weight
+#     tree_depth(), # max_depth
+#     size = 40
+#   )
+# 
+# xgb_model <-
+#   boost_tree(
+#     mode = "regression",
+#     trees = tune(),
+#     learn_rate = tune(),
+#     min_n = tune(), 
+#     tree_depth = tune()
+#   ) %>% 
+#   set_engine(
+#     "xgboost", 
+#     booster = "gbtree"
+#   )
+#xgb_tune <- 
+#  tune_grid(
+#    formula   = sale_price ~ .,
+#    model     = xgb_model,
+#    resamples = train_cv,
+#    grid      = xgb_grid,
+#    metrics   = metric_set(rmse),
+#    control   = control_grid(verbose = TRUE)
+#  )
+#
+# best_xgb <- 
+#   xgb_tune %>% 
+#   select_best("rmse", maximize = FALSE)
+# 
+# print(best_xgb)
+#
+# xgb_fit <- 
+#   xgb_model %>% 
+#   finalize_model(parameters = best_xgb) %>% 
+#   fit(sale_price ~ ., training(train_split))
+ 
+xgb_model <-
+  boost_tree(
+    mode = "regression",
+    trees = 587,
+    learn_rate = 0.0168,
+    min_n = 15, 
+    tree_depth = 7
+ ) %>% 
+  set_engine(
+    "xgboost", 
+    booster = "gbtree"
+ )
+
+xgb_fit <- 
+  xgb_model %>% 
+  fit(sale_price ~ ., training(train_split))
+
+xgb_predictions <- 
+  testing(train_split) %>%
+  select(sale_price) %>%
+  bind_cols(
+    predict(xgb_fit, testing(train_split))
+  )
+
+print(rmse(xgb_predictions, sale_price, .pred))
+```
+
+## SVM model
+```{r}
+svm_grid <-
+  grid_random(
+    scale_factor(),
+    degree(),
+    cost(),
+    size = 20
+  )
+
+svm_model <-
+  svm_poly(
+    mode = "regression",
+    scale_factor = tune(),
+    degree = tune(),
+    cost = tune()
+  ) %>% 
+  set_engine("kernlab",
+             scaled = FALSE)
+
+svm_tune <- 
+  tune_grid(
+    formula   = sale_price ~ .,
+    model     = svm_model,
+    resamples = train_cv,
+    grid      = svm_grid,
+    metrics   = metric_set(rmse),
+    control   = control_grid(verbose = FALSE)
+  )
+
+best_svm <- 
+  svm_tune %>% 
+  select_best("rmse", maximize = FALSE)
+
+print(best_svm)
+
+svm_fit <- 
+  svm_model %>% 
+  finalize_model(parameters = best_svm) %>% 
+  fit(sale_price ~ ., training(train_split))
+
+svm_predictions <- 
+  testing(train_split) %>%
+  select(sale_price) %>%
+  bind_cols(
+    predict(svm_fit, testing(train_split))
+  )
+
+print(rmse(svm_predictions, sale_price, .pred))
+```
+
+```{r}
+# Aveage the predictions
+avg_predictions <- 
+  tibble(
+    true = lasso_predictions$sale_price, 
+    avg_pred = (lasso_predictions$.pred * 0.65) + (xgb_predictions$.pred * 0.35))
+
+rmse(avg_predictions, true, avg_pred)
+```
+
