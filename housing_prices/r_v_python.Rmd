@@ -1,0 +1,748 @@
+---
+title: "Comparing R and Python to Predict Housing Prices"
+author: "Richard Paquin Morel"
+date: "1/22/2020"
+output:
+  html_document:
+    number_sections: true
+    toc: true
+    toc_depth: 2
+    theme: yeti
+    highlight: zenburn
+---
+
+# Introduction and prep
+
+First 
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+library(tidyverse)
+library(tidymodels)
+library(patchwork)
+library(glue)
+
+# Define theme for ggplot
+theme_set(
+  theme_minimal() +
+    theme(
+      axis.title.x = element_text(size = 12, hjust = 1),
+      axis.title.y = element_text(size = 12),
+      axis.text.x = element_text(size = 10),
+      axis.text.y = element_text(size = 10),
+      plot.title = element_text(size = 12, colour = "grey25", face = "bold"),
+      plot.subtitle = element_text(size = 11, colour = "grey45"))
+  )
+
+# Get ready for python
+library(reticulate)
+```
+
+Import python libraries
+```{python}
+import pandas as pd
+import numpy as np
+from scipy.stats import skew
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+from scipy import stats
+from scipy.stats import pearsonr
+```
+
+## Importing the data
+
+First, we import the training and testing data. I will do this in python. To call up python objects in R, we use `py$object`. 
+```{python}
+train = pd.read_csv('train.csv')
+test = pd.read_csv('test.csv')
+
+# Keep the IDs from the test data for submission
+ids = test['Id']
+```
+
+I'll assign the python objects to the R environment. Since the objects live in different places, 
+```{r}
+train <- py$train
+test <- py$test
+
+# Keep IDs for submission
+ids <- test %>% pull(Id)
+test <- test %>% select(-Id)
+
+# Keep outcome variable
+y <- train$SalePrice
+```
+
+# Exploratory data analysis
+
+## Examining the structure of the data
+
+First, it is always a good idea to know exactly _what_ the data look like. Key questions:
+
+1. How many variables/features/columns do I have?
+2. How many observations/rows do I have?
+3. What types of variables/features/columns do I have?
+4. Which variables/features/columns have missing observations and how many?
+
+Let's do this in R first. Check the dimensions and then the features. 
+```{r}
+print(glue("The training dataset has {ncol(train)} features and {nrow(train)} observations."))
+
+map_chr(train, class) %>% table() %>% {glue("There are {.} features of type {names(.)}")}
+```
+
+I like the `glimpse()` function from the `{tibble}` package a lot--it gives the dimension, the features, their type, and a quick glance at each. But it isn't great where there are a great deal of features. So, check the dimensions first. Here, it's not bad at all, so I use `glimpse()` to see the features and their type.
+```{r}
+glimpse(train)
+```
+
+Before moving onto Python, notice that some of the features are of class `list`. This is an artifact of importing via Python and then calling into the R environment. So we have some cleaning up to do. No problem. First, we will `unlist()` those features and then make sure that the missing values are encoded correctly, since, as you will see, the missing values are encoded now as strings!
+```{r}
+train <- train %>% mutate_if(is.list, unlist)
+
+train <- train %>% na_if("NaN")
+
+test <- test %>% mutate_if(is.list, unlist)
+
+test <- test %>% na_if("NaN")
+
+any(map_lgl(train, is.list))
+```
+
+That looks much better.
+
+Now, I will do the same thing in Python. _Quick reminder that Python is zero-indexed!!_
+```{python}
+print("The training dataset has %s features and %s observations" % (train.shape[1], train.shape[0]))
+
+#for col in train.columns:
+#  print("Feature {} is of type {}".format(col, train[[col]].dtypes[0]))
+  
+for name, val in zip(list(train.dtypes.value_counts().index), train.dtypes.value_counts()):
+  print('There are {} features of type {}'.format(val, name))
+
+```
+
+The method `head()` in `{pandas}` does something similar to `glimpse()`. It gives the number of features along with the first _n_ observation (by default 5, but I will use 10). Unlike `glimpse()` it does not give the type of each feature. But that's okay, we just got that information.
+```{python}
+train.head(10)
+```
+
+So we know there are 81 features and 1,460 observations. Very important for getting aquainted with a new dataset is to understand the missing data--which features have missing observations and how many. Just as important is to know (or figure out) the process by which missing values are generated. Is it due to random or systematic? Is it due to non-compliance/non-reporting? Data entry mistakes? Missing due to specific suppression rules? In the case of this data, the missing values are _meaningful_. Missing often--but not always--means "This house does not have this feature." Right now, we will just describe the missing data.
+
+First, in R. There are many ways to approach this. A simple way is `train %>% summarise_all(~sum(is.na(.)))`, but the output is not reader-friendly. So I'll pretty it up a bit. Note: wrapping the `map2` function in `{}` prevents the piped data frame from being used as the first argument--we need that in order to call `.[["name"]]` and `.[["value"]]` as the two variables to loop over.
+```{r}
+map_dbl(train, ~ sum(is.na(.x))) %>% table() %>% {glue("There {ifelse(. == 1, 'is', 'are')} {.} {ifelse(. == 1, 'feature', 'features')} with {names(.)} missing values")}
+```
+
+
+```{r}
+train %>% 
+  summarise_all(~sum(is.na(.))) %>% 
+  pivot_longer(cols = everything()) %>% 
+  filter(value != 0) %>% 
+  arrange(desc(value)) %>% 
+  {glue("{.[['name']]} has {.[['value']]} missing observations")}
+```
+
+We can also do this by percent, which provides an additional layer of information.
+```{r}
+train %>% 
+  summarise_all(~round(sum(is.na(.))/length(.), 4) * 100) %>% 
+  pivot_longer(cols = everything()) %>% 
+  filter(value != 0) %>% 
+  arrange(desc(value)) %>% 
+  {glue("{.[['name']]} has {.[['value']]}% missing observations")}
+```
+
+Now to do this in Python. `{pandas}` has a nifty `is.null()` method that we an chain with `sum()` to get the number of missing values in a series.
+```{python}
+mv = train.isnull().sum()
+mv = mv[mv!=0].sort_values(ascending=False)
+
+for name, val in zip(list(mv.index), mv):
+  print("{} has {} missing values".format(name, val))
+```
+
+And dividing by the length of the series gets us the proportion. 
+```{python}
+mv = (train.isnull().sum()/len(train))*100
+mv = mv[mv!=0].sort_values(ascending=False).round(2)
+
+for name, val in zip(list(mv.index), mv):
+  print("{} has {}% missing values".format(name, val))
+
+#for col in train.columns:
+#  prop = (train[col].isnull().sum()/len(train[col])) * 100
+#  print("{} has {}% missing values".format(col, prop.round(2)))
+```
+
+## Exploring the target feature/dependent variable/outcome
+Attending to the characteristics of the target variable is a critical part of data exploration. It helps to visualize the distribution to determine the type of analysis you might want to carry out.
+
+Knowing to content domain, we would not be surprised to see that the distribution is right-skewed, as things like housing prices, income, etc. often are. 
+```{r}
+p1 <- train %>%
+  ggplot(aes(x = SalePrice)) +
+  geom_histogram(aes(x = SalePrice, stat(density)),
+                 bins = 100,
+                 fill = "cornflowerblue",
+                 alpha = 0.7) +
+  geom_density(color = "midnightblue") +
+  scale_x_continuous(breaks= seq(0, 800000, by=100000), labels = scales::comma) +
+  labs(x = "Sale Price", y = "", title = "Density of Sale Price") +
+  theme(axis.text.x = element_text(size = 10, angle = 45, hjust = 1))
+
+p1
+```
+
+In such cases, it is useful to take the log of the feature in order to normalize its distribution. That way, it satisfies the expectations of linear modeling. 
+
+```{r}
+p2 <- train %>%
+  ggplot() +
+  geom_histogram(aes(x = log(SalePrice), stat(density)),
+                 bins = 100,
+                 fill = "cornflowerblue",
+                 alpha = 0.7) +
+  geom_density(aes(x = log(SalePrice)), color = "midnightblue") +
+  labs(x = "Natural log of Sale Price", y = "", title = "Density of Logged Sale Price")
+
+p1 + p2
+```
+
+Again, in Python, looking at the plots side by side.
+```{python}
+y = train['SalePrice']
+
+fig, ax = plt.subplots(1, 2, sharey=False, sharex=False)
+sns.distplot(y, ax=ax[0]).set(title='Density of Sale Price')
+sns.distplot(np.log(y), ax=ax[1]).set(title='Density of Logged Sale Price')
+```
+
+That looks much better. Next, let's explore the features.
+
+## Exploring the features
+
+
+## Exploring some bivariate relationships
+
+We might guess, based on our prior knowledge, that there is a meaningful positive relationship between how much a house costs and how big it is.
+
+```{r}
+p1 <- train %>%
+  ggplot(aes(x = GrLivArea, y = SalePrice)) +
+  geom_point(color = "cornflowerblue", alpha = 0.75) +
+  scale_y_continuous(breaks= seq(0, 800000, by=200000), labels = scales::comma) +
+  labs(x = "Above ground living area", y = "Sale Price", title = "Sale Price \nby Above Ground Living Area")
+
+p2 <- train %>%
+  ggplot(aes(x = GrLivArea, y = log10(SalePrice))) +
+  geom_point(color = "cornflowerblue", alpha = 0.75) +
+  labs(x = "Above ground living area", y = "Log of Sale Price", title = "Logged Sale Price \nby Above Ground Living Area")
+
+p1 + p2  
+```
+
+In Python, we can use `{matplotlib}` to see this relationship.
+```{python}
+fig, ax = plt.subplots(1, 2, sharey=False, sharex=False)
+ax[0].scatter(train['GrLivArea'], train['SalePrice'], alpha = 0.75, color = '#6495ED')
+ax[0].set_title('Sale Price \nby Above Ground Living Area')
+ax[1].scatter(train['GrLivArea'], np.log(train['SalePrice']), alpha = 0.75, color = '#6495ED')
+ax[1].set_title('Logged Sale Price \nby Above Ground Living Area')
+plt.show()
+```
+
+In both plots, we can see a few outliers--partularly the houses with relative low sale prices given their above ground living area. It would be wise to drop these, since there are probably reasons that they are unusual and our features won't pick that up.
+
+But, out of curiosity, let's see if there is some reason _in the data_ why these house sold for so little money. Perhaps it has to do with the overall quality of the house? Its type? Its zoning? Its location?
+```{r}
+p1 <- train %>%
+  ggplot(aes(x = GrLivArea, y = SalePrice)) +
+  geom_point(aes(color = factor(OverallQual)), alpha = 0.75) +
+  scale_color_viridis_d(name = "Overall Quality", 
+                        breaks = c("2", "4", "6", "8", "10")) +
+  scale_y_continuous(breaks= seq(0, 800000, by=200000), labels = scales::comma) +
+  labs(x = "Above ground living area", y = "Sale Price", title = "Sale Price \nby Above Ground Living Area") +
+  theme(legend.position = c(0.2, 0.8),
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 6),
+        legend.background = element_blank(),
+        legend.key.size = unit(5, "mm"),
+        legend.box.background = element_rect(color = "black", fill = "transparent"),
+        legend.margin = ggplot2::margin(0.1, 0.1, 0.1, 0.1, "cm"))
+
+p2 <- 
+  train %>%
+  mutate(MSZoning = factor(MSZoning, levels = c("RL", "RM", "C (all)", "FV", "RH"))) %>% 
+  ggplot(aes(x = GrLivArea, y = SalePrice)) +
+  geom_point(aes(color = MSZoning), alpha = 0.75) +
+  scale_color_viridis_d(name = "Zoning", end = 0.7) +
+  scale_y_continuous(breaks= seq(0, 800000, by=200000), labels = scales::comma) +
+  labs(x = "Above ground living area", y = "Sale Price", title = "Sale Price \nby Above Ground Living Area") +
+  theme(legend.position = c(0.2, 0.8),
+        legend.title = element_text(size = 8),
+        legend.text = element_text(size = 6),
+        legend.background = element_blank(),
+        legend.key.size = unit(5, "mm"),
+        legend.box.background = element_rect(color = "black", fill = "transparent"),
+        legend.margin = ggplot2::margin(0.1, 0.1, 0.1, 0.1, "cm"))
+
+p1 + p2
+```
+
+For my Python version, I will use `{seaborn}` rather than straight `{matplotlib}` to easily color the points by category.
+```{python}
+fig, ax = plt.subplots(1, 2, sharey=False, sharex=False)
+sns.scatterplot('GrLivArea', 'SalePrice', hue='OverallQual', data=train, palette='viridis', ax=ax[0], alpha=0.75)
+ax[0].set_title('Sale Price \nby Above Ground Living Area')
+ax[0].set_ylabel('Sale Price')
+sns.scatterplot('GrLivArea', 'SalePrice', hue='MSZoning', data=train, palette='viridis', ax=ax[1], alpha=0.75)
+#ax[1].set(title='Sale Price \nby Above Ground Living Area', xlabel='Above ground living area', ylabel = 'Sale Price')
+fig.tight_layout(pad=3.0)
+plt.show()
+```
+
+# Dealing with missing values
+
+We saw before that there are many features without missing values, but a bunch that have a lot. For some of those features, the missing values are meaningful--missing indicates that the house lacks that feature. Take, for example, pools. The feature `PoolQC`, indicate pool quality, has `r sum(is.na(train$PoolQC))` missing observations. They are missing because a pool that doesn't exist can't be assigned a quality! For features like this, it might make sense to assign a value like `None` if it is categorical and `0` if it is numeric. There are sets of related features--for example, those related to basements. If a home does not have a basement, clearly it will not have quality, condition, square footage, etc. related to that basement. So, for the categorical values, I will replace missing with `None` and for the numeric, I will replace missing with `0`.
+
+There are a handful of other features were is seems like we have true missing values--missing for some unknown reason, but certainly present in reality. For example, the `KitchenQual` feature. Certainly, all the homes in this dataset have kitchens, as I believe that is a legal requirement! So, this value is likely missing at random. There are a variety of imputation strategies. I will impute by the mode of the neighborhood and subclass, on the reasoning that homes within neighborhoods and classes are often similar. We might also consider a more sophisticated approach using regression or classification approaches.
+
+To do this, we want to combine the training and testing data so we can fixing the missing values and do the feature engineering all at once. And any scaling or centering we do, we want to do on the all the data at our disposal. We should also drop the target and the ID feature.
+
+```{r}
+all_dat <- bind_rows(train, test) %>% 
+  select(-Id, -SalePrice)
+
+none_vars <- c("BsmtCond",
+               "BsmtQual",
+               "BsmtExposure",
+               "BsmtFinType1",
+               "BsmtFinType2",
+               "MasVnrType",
+               "GarageType",
+               "GarageFinish",
+               "GarageQual",
+               "GarageCond",
+               "Alley",
+               "Fence",
+               "FireplaceQu",
+               "MiscFeature",
+               "PoolQC")
+
+all_dat <- 
+  all_dat %>% 
+  mutate_at(vars(all_of(none_vars)), ~ replace_na(., "None"))
+
+zero_vars <- c("MasVnrArea",
+               "BsmtFinSF1",
+               "BsmtFinSF2",
+               "BsmtFullBath",
+               "BsmtHalfBath",
+               "BsmtUnfSF",
+               "TotalBsmtSF",
+               "GarageArea",
+               "GarageCars",
+               "GarageYrBlt")
+
+all_dat <- 
+  all_dat %>% 
+  mutate_at(vars(all_of(zero_vars)), ~ replace_na(., 0))
+```
+
+In Python, I will do the same thing using `for` loops for the relevant features, taking advantage of `{pandas}` `fillna()` method.
+```{python}
+all_dat = pd.concat((train, test), sort = False, ignore_index = True)
+all_dat.drop(['Id', 'SalePrice'], axis = 1, inplace = True)
+
+# None vars
+none_vars = ['BsmtCond',
+             'BsmtQual',
+             'BsmtExposure',
+             'BsmtFinType1',
+             'BsmtFinType2',
+             'MasVnrType',
+             'GarageType',
+             'GarageFinish',
+             'GarageQual',
+             'GarageCond',
+             'Alley',
+             'Fence',
+             'FireplaceQu',
+             'MiscFeature',
+             'PoolQC']
+
+for var in none_vars:
+    all_dat[var] = all_dat[var].fillna('None')
+    
+# Zero vars
+zero_vars = ['MasVnrArea',
+             'BsmtFinSF1',
+             'BsmtFinSF2',
+             'BsmtFullBath',
+             'BsmtHalfBath',
+             'BsmtUnfSF',
+             'TotalBsmtSF',
+             'GarageArea',
+             'GarageCars',
+             'GarageYrBlt']
+
+for var in zero_vars:
+    all_dat[var] = all_dat[var].fillna(0)
+```
+
+Moving on to the observations missing at random. Most of these are categorical, and so I impute the mode. For the numeric feature--`LotFrontage`--I impute the median. Don't forget to `ungroup()`!
+```{r}
+random_vars <- c("Electrical", "Exterior1st", "Exterior2nd", "Functional", "KitchenQual", "MSZoning", "SaleType", "Utilities")
+
+all_dat <- 
+  all_dat %>% 
+  group_by(Neighborhood, MSSubClass) %>% 
+  mutate_at(vars(all_of(random_vars)), ~ ifelse(is.na(.), which.max(table(.)) %>% names(), .)) %>% 
+  group_by(Neighborhood) %>% 
+  mutate(LotFrontage = ifelse(is.na(LotFrontage), median(LotFrontage, na.rm = TRUE), LotFrontage)) %>% 
+  ungroup()
+```
+
+In Python, the approach is similar, using the `groupby()` method to group by neighborhood and class, along with the `fillna()` method. This approach uses a `lambda` function within a for loop. This is like using an anonymous function within an `apply` loop in R.
+```{python}
+random_vars = ['Electrical', 'Exterior1st', 'Exterior2nd', 'Functional', 'KitchenQual', 'MSZoning', 'SaleType', 'Utilities']
+
+for var in random_vars:
+    all_dat[var] = all_dat.groupby(['Neighborhood'])[var].apply(lambda x: x.fillna(x.mode()[0]))
+    
+all_dat["LotFrontage"] = all_dat.groupby(['Neighborhood'])['LotFrontage'].apply(lambda x: x.fillna(x.median()))
+```
+
+Now, we should have NO missing values in our data!
+```{r}
+sum(is.na(all_dat))
+```
+
+```{python}
+missing = all_dat.apply(lambda x: x.isnull().sum()) > 0
+print(missing.sum())
+```
+
+# Feature engineering
+
+
+```{r}
+all_dat <-
+  all_dat %>% 
+  mutate(TotalArea = `1stFlrSF` + `2ndFlrSF` + TotalBsmtSF,
+         AvgRmSF = GrLivArea / TotRmsAbvGrd,
+         TotalBaths = FullBath + (HalfBath * 0.5) + BsmtFullBath + (BsmtHalfBath * 0.5),
+         OutsideArea = OpenPorchSF + `3SsnPorch` + EnclosedPorch + ScreenPorch + WoodDeckSF,
+         OverallQual_x_OverallCond = OverallQual * OverallCond,
+         YearBuilt_x_OverallQual = YearBuilt * OverallQual) %>% 
+  mutate(TotalArea2 = TotalArea^2,
+         OverallQual2 = OverallQual^2)
+```
+
+```{python}
+# Feature engineering
+all_dat['TotalArea'] = all_dat['1stFlrSF'] + all_dat['2ndFlrSF'] + all_dat['TotalBsmtSF']
+all_dat['AvgRmSF'] = all_dat['GrLivArea'] / all_dat['TotRmsAbvGrd']
+all_dat['TotalBaths'] = all_dat['FullBath'] + (all_dat['HalfBath'] * 0.5) + all_dat['BsmtFullBath'] + (all_dat['BsmtHalfBath'] * 0.5)
+all_dat['OutsideArea'] = all_dat['OpenPorchSF'] + all_dat['3SsnPorch'] + all_dat['EnclosedPorch'] + all_dat['ScreenPorch'] + all_dat['WoodDeckSF']
+all_dat['OverallQual_x_OverallCond'] = all_dat['OverallQual'] * all_dat['OverallCond']
+all_dat['YearBuilt_x_OverallQual'] = all_dat['OverallQual'] * all_dat['YearBuilt']
+all_dat['TotalArea2'] = all_dat['TotalArea']**2
+all_dat['OverallQual2'] = all_dat['OverallQual']**2
+
+```
+
+
+```{r}
+qual_vars = c("BsmtCond", "BsmtQual", "ExterCond", 
+             "ExterQual", "FireplaceQu", "GarageCond", 
+             "GarageQual", "HeatingQC", "KitchenQual")
+all_dat <-
+  all_dat %>% 
+  mutate_at(vars(all_of(qual_vars)), ~ factor(., 
+                                              levels = c("None",
+                                                         "Po",
+                                                         "Fa",
+                                                         "TA",
+                                                         "Gd",
+                                                         "Ex"), 
+                                              ordered = TRUE)) %>% 
+  mutate(Functional = factor(Functional, 
+                             levels = c("Sev",
+                                        "Maj2",
+                                        "Maj1",
+                                        "Mod",
+                                        "Min1",
+                                        "Min2",
+                                        "Typ"),
+                             ordered = TRUE),
+         GarageFinish = factor(GarageFinish,
+                               levels = c("None",
+                                          "Unf",
+                                          "RFn",
+                                          "Fin"),
+                               ordered = TRUE),
+         BsmtFinType1 = factor(BsmtFinType1,
+                               levels = c("None",
+                                          "Unf",
+                                          "LwQ",
+                                          "Rec",
+                                          "BLQ",
+                                          "ALQ",
+                                          "GLQ"),
+                               ordered = TRUE),
+         BsmtFinType2 = factor(BsmtFinType2,
+                               levels = c("None",
+                                          "Unf",
+                                          "LwQ",
+                                          "Rec",
+                                          "BLQ",
+                                          "ALQ",
+                                          "GLQ"),
+                               ordered = TRUE))
+```
+
+
+```{python}
+qual = {'None': 0, 'Po': 1, 'Fa': 2, 'TA': 3, 'Gd': 4, 'Ex': 5}
+func = {'Sev': 0, 'Maj1': 1, 'Maj2': 1, 'Mod': 2, 'Min1': 3, 'Min2': 3, 'Typ': 4}
+fin = {'None': 0, 'Unf': 1, 'RFn': 2, 'Fin': 3}
+bsmt_fin = {'None': 0, 'Unf': 1, 'LwQ': 2, 'Rec': 3, 'BLQ': 4, 'ALQ': 5, 'GLQ': 6}
+
+qual_vars = ['BsmtCond', 'BsmtQual', 'ExterCond', 
+             'ExterQual', 'FireplaceQu', 'GarageCond', 
+             'GarageQual', 'HeatingQC', 'KitchenQual', 'PoolQC']
+
+for var in qual_vars:
+    all_dat[var] = all_dat[var].map(qual)
+    
+all_dat['Functional'] = all_dat['Functional'].map(func)
+all_dat['GarageFinish'] = all_dat['GarageFinish'].map(fin)
+all_dat['BsmtFinType1'] = all_dat['BsmtFinType1'].map(bsmt_fin)
+all_dat['BsmtFinType2'] = all_dat['BsmtFinType2'].map(bsmt_fin)
+```
+
+There are some _numeric_ features that are really categorical, so we should encode these as well. However, they are not ordinal and so we can convert them to strings. These include year, month, and subclass.
+```{r}
+nominal_vars = c("MSSubClass", "MoSold", "YrSold", "YearBuilt", "YearRemodAdd")
+
+all_dat <-
+  all_dat %>% 
+  mutate_at(vars(all_of(nominal_vars)), as.character)
+```
+
+```{python}
+nominal_vars = ['MSSubClass', 'MoSold', 'YrSold', 'YearBuilt', 'YearRemodAdd']
+
+for var in nominal_vars:
+    all_dat[var] = all_dat[var].astype(str)
+```
+
+Transform the variables using the Box-Cox method with a fudge factor of `+1`. I want to get the `lambda` for each feature so as to normalize that feature accurately. So first, I determine which features have a skewed distribution that I want to transform. I get the `lambda` for those features and then transform them using that `lambda`. I drop the skewed columns from the data frame and then bind the transformed features.
+```{r}
+skewed_vars <- 
+  map_lgl(all_dat %>% select_if(is.numeric), ~ (moments::skewness(.x) > 0.75)) %>% which() %>% names()
+
+lmbdas <- map_dbl(skewed_vars, ~ car::powerTransform(all_dat[[.x]] + 1)$lambda)
+
+trans_vars <- map2_dfc(skewed_vars, lmbdas, ~ car::bcPower(all_dat[[.x]] + 1, lambda = .y))
+
+colnames(trans_vars) <- skewed_vars
+
+all_dat <-
+  all_dat %>% 
+  select(-all_of(skewed_vars)) %>% 
+  bind_cols(trans_vars)
+```
+
+In Python, the `boxcox` function from the `scipy.stats` module automatically calculates `lambda` if it is not specified.
+```{python}
+from scipy.stats import boxcox
+
+numeric_feats = all_dat.dtypes[all_dat.dtypes != "object"].index
+
+skewed_cols = all_dat[numeric_feats].apply(lambda x: skew(x.dropna()))
+skewed_cols_idx = skewed_cols[skewed_cols > 0.75].index
+skewed_cols = all_dat[skewed_cols_idx]+1
+all_dat[skewed_cols_idx] = skewed_cols.transform(lambda x: boxcox(x)[0])
+```
+
+The R and Python approaches produce the same values for `lambda`. Just double-checking.
+
+R: 
+```{r}
+glue("Lambda value for LowQualFinSF in R is: {car::powerTransform(train[['LowQualFinSF']] + 1)$lambda}")
+```
+
+Python:
+```{python}
+xd, lam = boxcox((train['LowQualFinSF'])+1)
+print('Lambda value for LowQualFinSF in Python is: %f' % lam)
+```
+
+As our last step, I will use one-hot encoding to turn nominal features into dummies. In Python, `{pandas}` has a built-in method to accomplish this. In R, one can use `getDummies()` from the `{caret}` package--which is superseded a bit by the `step_dummy()` function in `{recipes}`. But I'll use the base R approach to avoid adding any additional packages into the mix.
+```{r}
+dummies <- model.matrix(~.-1, data = all_dat %>% select_if(is.character))
+
+all_dat <-
+  all_dat %>% 
+  select_if(negate(is.character)) %>% 
+  bind_cols(dummies %>% as_tibble())
+```
+
+Quick and easy in Python.
+```{python}
+nominal_vars = ['Alley', 'BldgType', 'Condition1', 'Condition2', 'Electrical', 
+                'Exterior1st', 'Exterior2nd', 'Fence', 'Foundation', 'GarageType', 
+                'Heating', 'HouseStyle', 'LandContour', 'LotConfig', 'MSSubClass',
+                'MSZoning', 'MasVnrType', 'MiscFeature', 'MoSold', 'Neighborhood',
+                'RoofMatl', 'RoofStyle', 'SaleCondition', 'SaleType', 'YrSold',
+                'CentralAir', 'BsmtExposure', 'LandSlope', 'LotShape', 'PavedDrive',
+                'YearBuilt', 'YearRemodAdd', 'Street', 'Utilities']
+
+dummies = pd.get_dummies(all_dat[nominal_vars])
+all_dat = pd.concat((all_dat.drop(nominal_vars, axis = 1), dummies), sort = False, axis = 1)
+```
+
+Double-check that there are no missing observations about all this feature engineering.
+```{r}
+sum(is.na(all_dat))
+```
+
+```{python}
+missing = all_dat.apply(lambda x: x.isnull().sum()) > 0
+print(missing.sum())
+```
+
+
+Great, ready to start modeling!
+
+# Modeling
+
+The first thing I will do is split the training data into another pair of training and testing. I will fit each model on the training data and evaluate it on the testing data. I need to subset the `all_dat` data frame to include only the values in the initial training data set and then split into a training and testing set using a 70/30 split. There are many ways to do this here by hand, but there are also a few packages that have functions to accomplish this. I'm particularly fond of [`initial_split()`](https://tidymodels.github.io/rsample/reference/initial_split.html) from the `{rsample}` package that is part of the `{tidymodels}` ecosystem. I'm going to use the `{tidyverse}` ecosystem to tune and model, so I'll using `{rsample}` here. The `initial_split()` function creates a training and testing set that are called using `training()` and `testing()`. I will further use cross-validation to for model selection. The `vfold_cv()` function creates an n-fold cross-validation split in the data set. Here, we use it on the training split of the training data.
+```{r}
+train_dat <- all_dat %>% slice(1:nrow(train))
+
+# Add the log of the target back to the training data for modeling
+train_dat[["SalePrice"]] <- log(train[["SalePrice"]])
+
+#sz <- ceiling(nrow(X)*.7)
+#
+#set.seed(1491)
+#train_idx <- sort(sample(nrow(X), sz))
+#X_train <- X[train_idx, ]
+#X_test <- X[-train_idx, ]
+#
+#y_train <- y[train_idx]
+#y_test <- y[-train_idx]
+
+set.seed(1491)
+train_split <- initial_split(train_dat, prob = 0.7)
+train_cv <- training(train_split) %>% vfold_cv(v = 5)
+
+glue("The training data is {nrow(training(train_split))} rows by {ncol(training(train_split))} columns")
+glue("The testing data is {nrow(testing(train_split))} rows by {ncol(testing(train_split))} columns")
+```
+
+For Python, after I subset the `all_dat` data from to include only the data in the initial training dataset, I use the `train_test_split()` function from sci-kit learn.
+```{python}
+from sklearn.model_selection import train_test_split
+
+X = all_dat.iloc[:len(train),:]
+y = np.log(train['SalePrice'])
+test = all_dat.iloc[len(train):,:]
+
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.3, random_state = 1491)
+
+y_train, y_test = np.log(y_train), np.log(y_test)
+
+print('The training data is {} rows by {} columns'.format(X_train.shape[0], X_train.shape[1]))
+print('The testing data is {} rows by {} columns'.format(X_test.shape[0], X_test.shape[1]))
+```
+
+## Regularized regression
+
+To tune and fit the various models I will try in R, I will use a set of packages from the [`{tidymodels}`](https://github.com/tidymodels) ecosystem. These packages were developed, in part, by the creator of the`{caret}` package and designed to supplant it. To break it down: I will use `{parsnip}` to define and fit models, `{dials}` and `{tune}` to tune the hyperparameters, and `{rsample}` to cross-validate, and `{yardstick}` to evaluate the model.
+```{r}
+lasso_model <-
+    linear_reg(
+        penalty = tune(),
+        mixture = 1) %>%
+    set_engine("glmnet",
+               standardize = TRUE)
+
+alphas <- grid_regular(penalty(), levels = 25)
+alphas_py <- alphas %>% pull(penalty)
+
+lasso_cv <-
+    tune_grid(
+        formula = SalePrice ~ .,
+        model = lasso_model,
+        resamples = train_cv,
+        grid = alphas,
+        metrics = metric_set(rmse),
+        control = control_grid(verbose = FALSE)
+    )
+
+best_lasso <-
+    lasso_cv %>%
+    select_best("rmse", maximize = FALSE)
+
+print(best_lasso)
+
+best_lasso_model <-
+    lasso_model %>%
+    finalize_model(parameters = best_lasso)
+
+lasso_fit <-
+    best_lasso_model %>%
+    fit(sale_price ~ ., training(train_split))
+
+lasso_predictions <- predict(lasso_fit, testing(train_split))
+
+testing(train_split) %>%
+  select(sale_price) %>%
+  bind_cols(lasso_predictions) %>%
+  rmse(sale_price, .pred)
+```
+
+
+```{python}
+from sklearn.metrics import mean_squared_error, make_scorer
+from sklearn.linear_model import LassoCV
+from sklearn.model_selection import KFold
+from sklearn.model_selection import cross_val_score
+from sklearn.pipeline import make_pipeline
+from sklearn.preprocessing import RobustScaler
+
+K = 5
+kf = KFold(n_splits=K, shuffle=True, random_state=1491)
+
+def rmse(y_train, y_pred):
+    return np.sqrt(mean_squared_error(y_train, y_pred))
+
+alphas = [r.alphas_py]
+alphas
+lasso = make_pipeline(RobustScaler(), LassoCV(max_iter=1e7, 
+                                              alphas=alphas,
+                                              random_state=1491, 
+                                              cv=5,
+                                              n_jobs=-1,
+                                              normalize=True))
+
+lasso.fit(X_train, y_train)                                        
+```
+
+```{python}
+def rmse(y_train, y_pred):
+    return np.sqrt(mean_squared_error(y_train, y_pred))
+    
+lasso_pred = lasso.predict(X_test)
+print(rmse(np.exp(y_test), np.exp(lasso_pred)))
+```
+
