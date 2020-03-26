@@ -1,4 +1,4 @@
-vtoolymode---
+---
 title: "A tidy approach to predicting housing prices: Preprocessing, tuning, modeling, and predicting with Tidymodels"
 author: "Richard Paquin Morel"
 date: "1/22/2020"

@@ -232,7 +232,6 @@ train_test <- train_test %>% map2(c("train", "test"), ~ mutate(.x, set = .y)) %>
 clean_dat <-
   train_test %>% 
   mutate(text = str_to_lower(text)) %>% 
-  mutate(text = str_replace_all(text, "%20", "")) %>% 
   mutate(text = str_replace_all(text, "https?://\\S+", " ")) %>% 
   mutate(text = str_replace_all(text, "\\&amp", " ")) %>% 
   mutate(text = iconv(text, "utf8", "ASCII", sub = " ")) %>% 
@@ -241,61 +240,38 @@ clean_dat <-
   mutate(text = str_replace_all(text, "\r", " ")) %>%  
   mutate(text = str_replace_all(text, "[0-9]", " ")) %>% 
   mutate(text = str_replace_all(text, "@_\\S+ ", " ")) %>%
-  mutate(text = str_replace_all(text, "[:punct:]", " ")) %>%
   mutate(text = tm::removeWords(text, get_stopwords()$word)) %>% 
+  mutate(text = tm::removePunctuation(text)) %>% 
   mutate(text = str_squish(text))
 
+
 ## GloVE ----
-lines <- readLines("glove.6B.100d.txt")
+tokens <-  word_tokenizer(clean_dat$text)
+it <- itoken(tokens, progressbar = FALSE)
+vocab <- create_vocabulary(it)
+vectorizer <- vocab_vectorizer(vocab)
+tcm <- create_tcm(it, vectorizer, skip_grams_window = 5L)
 
-# Create an index for the word and its associated coefficients
-embeddings_index <- new.env(parent = emptyenv())
-for (line in lines) {
-  coefs <- as.numeric(strsplit(line, ' ', fixed = TRUE)[[1]][-1])
-  word <- strsplit(line, ' ', fixed = TRUE)[[1]][1]
-  embeddings_index[[word]] <- coefs
-  }
+glove <- GlobalVectors$new(word_vectors_size = 100, vocab, x_max = 10)
+wv_main <- glove$fit_transform(tcm)
+wv_context <- glove$components
+word_vectors <- wv_main + t(wv_context)
 
+vocab_size <- nrow(vocab)
 tokenizer <- text_tokenizer()
-tokenizer %>% fit_text_tokenizer(clean_dat[["text"]])
-sequences <- texts_to_sequences(tokenizer, clean_dat[["text"]])
+tokenizer$fit_on_texts(clean_dat$text)
+sequences <- tokenizer$texts_to_sequences(clean_dat$text)
+pad_texts <- pad_sequences(sequences, maxlen = 50, truncating='post',padding='post')
 
-word_index <- tokenizer$word_index
+num_words <- length(tokenizer$word_index) + 1
 
-pad_texts <- pad_sequences(sequences, maxlen=50)
-
-num_words <- min(20000, length(word_index) + 1)
-
-prepare_embedding_matrix <- function() {
-  embedding_matrix <- matrix(0L, nrow = num_words, ncol = 100)
-  for (word in names(word_index)) {
-    index <- word_index[[word]]
-    if (index >= 20000)
-      next
-    embedding_vector <- embeddings_index[[word]]
-    if (!is.null(embedding_vector)) {
-      # words not found in embedding index will be all-zeros.
-      embedding_matrix[index,] <- embedding_vector
-    }
-  }
-  embedding_matrix
-}
-
-embedding_matrix <- prepare_embedding_matrix()
-
-
-
-
-y_train <- clean_dat[["target"]][!is.na(clean_dat[["target"]])]
+y_train <- clean_dat$target
 X_train <- pad_texts[!is.na(train_test$target), ]
 
 model <- keras_model_sequential()
 model %>% 
-  layer_embedding(input_dim = num_words, 
-                  output_dim = 100, 
-                  input_length = 50, 
-                  weight = list(embedding_matrix),
-                  trainable = FALSE) %>%
+  layer_embedding(input_dim = num_words, output_dim = 100, input_length = 50, 
+                  embeddings_initializer = initializer_constant(word_vectors)) %>%
   layer_spatial_dropout_1d(0.3) %>%
   layer_lstm(64, dropout=0.2, recurrent_dropout=0.2) %>% 
   layer_dense(units = 1, activation = "sigmoid")
@@ -377,22 +353,82 @@ tibble(
 
 ## Logistic regression using tweet features ----
 library(rsample)
-train <-
-  train %>% 
-  mutate(keyword = ifelse(is.na(keyword), "None", keyword),
-         has_link = as.numeric(str_detect(text, "http://")),
-         contains_hashtag = as.numeric(str_detect(text, "#")),
-         nchar = nchar(text),
-         n_words = str_count(text, "\\w+"),
-         disaster_key = ifelse(str_detect(text, disaster_keys %>% pull(word) %>% paste(collapse = "|")), 1, 0),
-         disaster_ngram = ifelse(str_detect(text, disaster_ngrams %>% pull(word) %>% paste(collapse = "|")), 1, 0),
-         ) %>% 
-  mutate(d_key_or_n = ifelse(disaster_key == 1 | disaster_ngram == 1, 1, 0))
+train_test <-
+  list(train, test) %>% 
+  map(~ .x %>% 
+        mutate(
+          keyword = ifelse(is.na(keyword), "None", keyword),
+          location = ifelse(is.na(location), "None", location),
+          character_count = nchar(text),
+          hashtag_count = str_count(text, "#"),
+          has_hashtag = as.numeric(str_detect(text, "#")),
+          mention_count = str_count(text, "@"),
+          has_mention = as.numeric(str_detect(text, "@")),
+          link_count = str_count(text, "https?://"),
+          has_link = as.numeric(str_detect(text, "https?://")),
+          word_count = str_count(text, "\\w+"),
+          unique_words = map_dbl(str_split(text, " "), ~length(unique(.x)))
+        )
+  )
+
+train_dat <- train_test[[1]] %>% select(-id, -location, -text) %>% mutate_if(is.character, as.factor)
+test_dat <- train_test[[2]] %>% select(-id, -location, -text)  %>% mutate_if(is.character, as.factor)
 
 set.seed(1491)
-train_split <- initial_split(train, strata = target)
+train_split <- initial_split(train_dat, strata = target)
 
-simple_fit <- glm(target ~ keyword + contains_hashtag + nchar + n_words + d_key_or_n + has_link, data = training(train_split))
+train_cv <- vfold_cv(training(train_split), v = 5)
+
+net_model <-
+  logistic_reg(
+    mode = "classification",
+    penalty = tune(),
+    mixture = tune()) %>%
+  set_engine("glmnet")
+
+alphas <- grid_regular(penalty(), mixture(), levels = 5)
+
+net_cv <-
+  tune_grid(
+    formula = factor(target) ~ .,
+    model = net_model,
+    resamples = train_cv,
+    grid = alphas,
+    metrics = metric_set(accuracy),
+    control = control_grid(verbose = TRUE)
+  )
+
+best_net <-
+  net_cv %>%
+  select_best("accuracy")
+
+best_net_model <-
+  net_model %>%
+  finalize_model(parameters = best_net)
+
+net_fit <-
+  best_net_model %>%
+  fit(factor(target) ~ ., train_dat)
+
+net_predictions <- predict(net_fit, testing(train_split))
+
+rc <- testing(train_split) %>%
+  select(target) %>%
+  bind_cols(net_predictions) %>%
+  yardstick::recall(factor(target), factor(.pred_class)) %>% 
+  pull(.estimate)
+
+prec <- testing(train_split) %>%
+  select(target) %>%
+  bind_cols(net_predictions) %>%
+  yardstick::precision(factor(target), factor(.pred_class)) %>% 
+  pull(.estimate)
+
+2 * ((prec * rc) / (prec + rc))
+
+
+
+simple_fit <- glm(target ~ ., data = training(train_split))
 preds <- predict(simple_fit, newdata = testing(train_split))
 
 tab <-
@@ -406,17 +442,6 @@ prec <- yardstick::precision(tab, truth, estimate)$.estimate
 
 2 * ((prec * rc) / (prec + rc))
 
-test <-
-  test %>% 
-  mutate(keyword = ifelse(is.na(keyword), "None", keyword),
-         has_link = as.numeric(str_detect(text, "http://")),
-         contains_hashtag = as.numeric(str_detect(text, "#")),
-         nchar = nchar(text),
-         n_words = str_count(text, "\\w+"),
-         disaster_key = ifelse(str_detect(text, disaster_keys %>% pull(word) %>% paste(collapse = "|")), 1, 0),
-         disaster_ngram = ifelse(str_detect(text, disaster_ngrams %>% pull(word) %>% paste(collapse = "|")), 1, 0),
-  ) %>% 
-  mutate(d_key_or_n = ifelse(disaster_key == 1 | disaster_ngram == 1, 1, 0))
 
 preds <- predict(simple_fit, newdata = test)
 
