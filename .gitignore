@@ -2,11 +2,11 @@
 .Rhistory
 .RData
 .Ruserdata
-*.icloud
+*.idea
 *.ipynb
 *.json
 *.Rproj
-*.DS_Store
+*.xml
+*.rft
 *.csv
-*.html
-*glove.6B.100d.txt
+*.txt
