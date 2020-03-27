@@ -305,6 +305,19 @@ fig.tight_layout(pad=3.0)
 plt.show()
 ```
 
+We should drop those outliers. 
+```{r}
+train <-
+  train %>%
+  filter(
+    !(GrLivArea > 4000 & SalePrice < 200000)
+  )
+```
+
+```{python}
+train.drop(train[(train['GrLivArea']>4000) & (train['SalePrice']<300000)].index, inplace = True)
+```
+
 # Dealing with missing values
 
 We saw before that there are many features without missing values, but a bunch that have a lot. For some of those features, the missing values are meaningful--missing indicates that the house lacks that feature. Take, for example, pools. The feature `PoolQC`, indicate pool quality, has `r sum(is.na(train$PoolQC))` missing observations. They are missing because a pool that doesn't exist can't be assigned a quality! For features like this, it might make sense to assign a value like `None` if it is categorical and `0` if it is numeric. There are sets of related features--for example, those related to basements. If a home does not have a basement, clearly it will not have quality, condition, square footage, etc. related to that basement. So, for the categorical values, I will replace missing with `None` and for the numeric, I will replace missing with `0`.
@@ -412,9 +425,9 @@ In Python, the approach is similar, using the `groupby()` method to group by nei
 random_vars = ['Electrical', 'Exterior1st', 'Exterior2nd', 'Functional', 'KitchenQual', 'MSZoning', 'SaleType', 'Utilities']
 
 for var in random_vars:
-    all_dat[var] = all_dat.groupby(['Neighborhood'])[var].apply(lambda x: x.fillna(x.mode()[0]))
+    all_dat[var] = all_dat.groupby(['Neighborhood', 'MSSubClass'])[var].apply(lambda x: x.fillna(x.mode()[0]))
     
-all_dat["LotFrontage"] = all_dat.groupby(['Neighborhood'])['LotFrontage'].apply(lambda x: x.fillna(x.median()))
+all_dat['LotFrontage'] = all_dat.groupby(['Neighborhood'])['LotFrontage'].apply(lambda x: x.fillna(x.median()))
 ```
 
 Now, we should have NO missing values in our data!
@@ -429,7 +442,6 @@ print(missing.sum())
 
 # Feature engineering
 
-
 ```{r}
 all_dat <-
   all_dat %>% 
@@ -438,7 +450,8 @@ all_dat <-
          TotalBaths = FullBath + (HalfBath * 0.5) + BsmtFullBath + (BsmtHalfBath * 0.5),
          OutsideArea = OpenPorchSF + `3SsnPorch` + EnclosedPorch + ScreenPorch + WoodDeckSF,
          OverallQual_x_OverallCond = OverallQual * OverallCond,
-         YearBuilt_x_OverallQual = YearBuilt * OverallQual) %>% 
+         YearBuilt_x_OverallQual = YearBuilt * OverallQual,
+         YearBuilt_x_OverallCond = YearBuilt * OverallCond) %>% 
   mutate(TotalArea2 = TotalArea^2,
          OverallQual2 = OverallQual^2)
 ```
@@ -451,6 +464,7 @@ all_dat['TotalBaths'] = all_dat['FullBath'] + (all_dat['HalfBath'] * 0.5) + all_
 all_dat['OutsideArea'] = all_dat['OpenPorchSF'] + all_dat['3SsnPorch'] + all_dat['EnclosedPorch'] + all_dat['ScreenPorch'] + all_dat['WoodDeckSF']
 all_dat['OverallQual_x_OverallCond'] = all_dat['OverallQual'] * all_dat['OverallCond']
 all_dat['YearBuilt_x_OverallQual'] = all_dat['OverallQual'] * all_dat['YearBuilt']
+all_dat['YearBuilt_x_OverallCond'] = all_dat['OverallCond'] * all_dat['YearBuilt']
 all_dat['TotalArea2'] = all_dat['TotalArea']**2
 all_dat['OverallQual2'] = all_dat['OverallQual']**2
 
@@ -460,7 +474,7 @@ all_dat['OverallQual2'] = all_dat['OverallQual']**2
 ```{r}
 qual_vars = c("BsmtCond", "BsmtQual", "ExterCond", 
              "ExterQual", "FireplaceQu", "GarageCond", 
-             "GarageQual", "HeatingQC", "KitchenQual")
+             "GarageQual", "HeatingQC", "KitchenQual", "PoolQC")
 all_dat <-
   all_dat %>% 
   mutate_at(vars(all_of(qual_vars)), ~ factor(., 
@@ -528,7 +542,13 @@ all_dat['BsmtFinType2'] = all_dat['BsmtFinType2'].map(bsmt_fin)
 
 There are some _numeric_ features that are really categorical, so we should encode these as well. However, they are not ordinal and so we can convert them to strings. These include year, month, and subclass.
 ```{r}
-nominal_vars = c("MSSubClass", "MoSold", "YrSold", "YearBuilt", "YearRemodAdd")
+nominal_vars = c("Alley", "BldgType", "Condition1", "Condition2", "Electrical", 
+                "Exterior1st", "Exterior2nd", "Fence", "Foundation", "GarageType", 
+                "Heating", "HouseStyle", "LandContour", "LotConfig", "MSSubClass",
+                "MSZoning", "MasVnrType", "MiscFeature", "MoSold", "Neighborhood",
+                "RoofMatl", "RoofStyle", "SaleCondition", "SaleType", "YrSold",
+                "CentralAir", "BsmtExposure", "LandSlope", "LotShape", "PavedDrive",
+                "YearBuilt", "YearRemodAdd", "Street", "Utilities")
 
 all_dat <-
   all_dat %>% 
@@ -536,13 +556,36 @@ all_dat <-
 ```
 
 ```{python}
-nominal_vars = ['MSSubClass', 'MoSold', 'YrSold', 'YearBuilt', 'YearRemodAdd']
+nominal_vars = ['Alley', 'BldgType', 'Condition1', 'Condition2', 'Electrical', 
+                'Exterior1st', 'Exterior2nd', 'Fence', 'Foundation', 'GarageType', 
+                'Heating', 'HouseStyle', 'LandContour', 'LotConfig', 'MSSubClass',
+                'MSZoning', 'MasVnrType', 'MiscFeature', 'MoSold', 'Neighborhood',
+                'RoofMatl', 'RoofStyle', 'SaleCondition', 'SaleType', 'YrSold',
+                'CentralAir', 'BsmtExposure', 'LandSlope', 'LotShape', 'PavedDrive',
+                'YearBuilt', 'YearRemodAdd', 'Street', 'Utilities']
 
 for var in nominal_vars:
     all_dat[var] = all_dat[var].astype(str)
 ```
 
-Transform the variables using the Box-Cox method with a fudge factor of `+1`. I want to get the `lambda` for each feature so as to normalize that feature accurately. So first, I determine which features have a skewed distribution that I want to transform. I get the `lambda` for those features and then transform them using that `lambda`. I drop the skewed columns from the data frame and then bind the transformed features.
+
+I will use one-hot encoding to turn nominal features into dummies. In Python, `{pandas}` has a built-in method to accomplish this. In R, one can use `getDummies()` from the `{caret}` package--which is superseded a bit by the `step_dummy()` function in `{recipes}`. But I'll use the base R approach to avoid adding any additional packages into the mix.
+```{r}
+dummies <- model.matrix(~.-1, data = all_dat %>% select_if(is.character))
+
+all_dat <-
+  all_dat %>% 
+  select_if(negate(is.character)) %>% 
+  bind_cols(dummies %>% as_tibble())
+```
+
+Quick and easy in Python.
+```{python}
+dummies = pd.get_dummies(all_dat[nominal_vars])
+all_dat = pd.concat((all_dat.drop(nominal_vars, axis = 1), dummies), sort = False, axis = 1)
+```
+
+As our last step, transform the variables using the Box-Cox method with a fudge factor of `+1`. I want to get the `lambda` for each feature so as to normalize that feature accurately. So first, I determine which features have a skewed distribution that I want to transform. I get the `lambda` for those features and then transform them using that `lambda`. I drop the skewed columns from the data frame and then bind the transformed features.
 ```{r}
 skewed_vars <- 
   map_lgl(all_dat %>% select_if(is.numeric), ~ (moments::skewness(.x) > 0.75)) %>% which() %>% names()
@@ -584,29 +627,6 @@ xd, lam = boxcox((train['LowQualFinSF'])+1)
 print('Lambda value for LowQualFinSF in Python is: %f' % lam)
 ```
 
-As our last step, I will use one-hot encoding to turn nominal features into dummies. In Python, `{pandas}` has a built-in method to accomplish this. In R, one can use `getDummies()` from the `{caret}` package--which is superseded a bit by the `step_dummy()` function in `{recipes}`. But I'll use the base R approach to avoid adding any additional packages into the mix.
-```{r}
-dummies <- model.matrix(~.-1, data = all_dat %>% select_if(is.character))
-
-all_dat <-
-  all_dat %>% 
-  select_if(negate(is.character)) %>% 
-  bind_cols(dummies %>% as_tibble())
-```
-
-Quick and easy in Python.
-```{python}
-nominal_vars = ['Alley', 'BldgType', 'Condition1', 'Condition2', 'Electrical', 
-                'Exterior1st', 'Exterior2nd', 'Fence', 'Foundation', 'GarageType', 
-                'Heating', 'HouseStyle', 'LandContour', 'LotConfig', 'MSSubClass',
-                'MSZoning', 'MasVnrType', 'MiscFeature', 'MoSold', 'Neighborhood',
-                'RoofMatl', 'RoofStyle', 'SaleCondition', 'SaleType', 'YrSold',
-                'CentralAir', 'BsmtExposure', 'LandSlope', 'LotShape', 'PavedDrive',
-                'YearBuilt', 'YearRemodAdd', 'Street', 'Utilities']
-
-dummies = pd.get_dummies(all_dat[nominal_vars])
-all_dat = pd.concat((all_dat.drop(nominal_vars, axis = 1), dummies), sort = False, axis = 1)
-```
 
 Double-check that there are no missing observations about all this feature engineering.
 ```{r}
@@ -659,8 +679,6 @@ test = all_dat.iloc[len(train):,:]
 X_train, X_test, y_train, y_test = train_test_split(
     X, y, test_size=0.3, random_state = 1491)
 
-y_train, y_test = np.log(y_train), np.log(y_test)
-
 print('The training data is {} rows by {} columns'.format(X_train.shape[0], X_train.shape[1]))
 print('The testing data is {} rows by {} columns'.format(X_test.shape[0], X_test.shape[1]))
 ```
@@ -676,7 +694,7 @@ lasso_model <-
     set_engine("glmnet",
                standardize = TRUE)
 
-alphas <- grid_regular(penalty(), levels = 25)
+alphas <- grid_regular(penalty(range = c(-5, 0)), levels = 10)
 alphas_py <- alphas %>% pull(penalty)
 
 lasso_cv <-
@@ -701,20 +719,22 @@ best_lasso_model <-
 
 lasso_fit <-
     best_lasso_model %>%
-    fit(sale_price ~ ., training(train_split))
+    fit(SalePrice ~ ., training(train_split))
 
 lasso_predictions <- predict(lasso_fit, testing(train_split))
 
 testing(train_split) %>%
-  select(sale_price) %>%
+  select(SalePrice) %>%
   bind_cols(lasso_predictions) %>%
-  rmse(sale_price, .pred)
+  rmse(SalePrice, .pred) %>% 
+  pull(.estimate) %>% 
+  {glue("For the LASSO model in R, the RMSE is {round(., 4)}")}
 ```
 
 
 ```{python}
 from sklearn.metrics import mean_squared_error, make_scorer
-from sklearn.linear_model import LassoCV
+from sklearn.linear_model import LassoCV, ElasticNetCV
 from sklearn.model_selection import KFold
 from sklearn.model_selection import cross_val_score
 from sklearn.pipeline import make_pipeline
@@ -726,7 +746,7 @@ kf = KFold(n_splits=K, shuffle=True, random_state=1491)
 def rmse(y_train, y_pred):
     return np.sqrt(mean_squared_error(y_train, y_pred))
 
-alphas = [r.alphas_py]
+alphas = r.alphas_py
 alphas
 lasso = make_pipeline(RobustScaler(), LassoCV(max_iter=1e7, 
                                               alphas=alphas,
@@ -735,14 +755,74 @@ lasso = make_pipeline(RobustScaler(), LassoCV(max_iter=1e7,
                                               n_jobs=-1,
                                               normalize=True))
 
-lasso.fit(X_train, y_train)                                        
+lasso.fit(X_train, y_train)
+lasso_pred = lasso.predict(X_test)
+print("For the LASSO model in Python, the RMSE is {}".format(rmse(y_test, lasso_pred).round(4)))
 ```
 
 ```{python}
-def rmse(y_train, y_pred):
-    return np.sqrt(mean_squared_error(y_train, y_pred))
-    
-lasso_pred = lasso.predict(X_test)
-print(rmse(np.exp(y_test), np.exp(lasso_pred)))
+X_train
+```
+
+## Elastic net model
+
+```{r}
+en_model <-
+    linear_reg(
+        penalty = tune(),
+        mixture = tune()) %>%
+    set_engine("glmnet",
+               standardize = TRUE)
+
+en_grid <- grid_regular(penalty(range = c(-5, 0)), mixture(), levels = 5)
+alphas_py <- en_grid %>% pull(penalty)
+l1 <- en_grid %>% pull(mixture)
+
+en_cv <-
+    tune_grid(
+        formula = SalePrice ~ .,
+        model = en_model,
+        resamples = train_cv,
+        grid = en_grid,
+        metrics = metric_set(rmse),
+        control = control_grid(verbose = FALSE)
+    )
+
+best_en <-
+    en_cv %>%
+    select_best("rmse", maximize = FALSE)
+
+print(best_en)
+
+best_en_model <-
+    en_model %>%
+    finalize_model(parameters = best_en)
+
+en_fit <-
+    best_en_model %>%
+    fit(SalePrice ~ ., training(train_split))
+
+en_predictions <- predict(en_fit, testing(train_split))
+
+testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(en_predictions) %>%
+  rmse(SalePrice, .pred) %>% 
+  pull(.estimate) %>% 
+  {glue("For the Elastic Net model in R, the RMSE is {round(., 4)}")}
+```
+
+```{python}
+alphas = r.alphas_py
+l1 = r.l1
+
+elasticnet = make_pipeline(RobustScaler(), ElasticNetCV(max_iter=1e7, 
+                                                        alphas=alphas, 
+                                                        cv=5, 
+                                                        l1_ratio=l1))
+                                                        
+elasticnet.fit(X_train, y_train)
+elasticnet_pred = elasticnet.predict(X_test)
+print("For the Elastic Net model in Python, the RMSE is {}".format(rmse(y_test, elasticnet_pred).round(4)))
 ```
 
