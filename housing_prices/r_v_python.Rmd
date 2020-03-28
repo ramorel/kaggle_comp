@@ -892,7 +892,7 @@ from sklearn.svm import SVR
 #                   param_grid={"C": [1e0, 1e1, 1e2, 1e3],
 #                               "gamma": np.logspace(-2, 2, 5)})
    
-svr = SVR(kernel='poly', C= 20, gamma=0.001)                            
+svr = SVR(kernel='poly', C = 0.105, gamma = 0.1)
 svr.fit(X_train, y_train)
 svr_pred = svr.predict(X_test)
 print("For the SVR model in Python, the RMSE is {}".format(rmse(y_test, svr_pred).round(4)))
