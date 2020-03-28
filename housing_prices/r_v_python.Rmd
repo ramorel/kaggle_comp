@@ -448,10 +448,11 @@ all_dat <-
   mutate(TotalArea = `1stFlrSF` + `2ndFlrSF` + TotalBsmtSF,
          AvgRmSF = GrLivArea / TotRmsAbvGrd,
          TotalBaths = FullBath + (HalfBath * 0.5) + BsmtFullBath + (BsmtHalfBath * 0.5),
-         OutsideArea = OpenPorchSF + `3SsnPorch` + EnclosedPorch + ScreenPorch + WoodDeckSF,
-         OverallQual_x_OverallCond = OverallQual * OverallCond,
-         YearBuilt_x_OverallQual = YearBuilt * OverallQual,
-         YearBuilt_x_OverallCond = YearBuilt * OverallCond) %>% 
+         OutsideArea = OpenPorchSF + `3SsnPorch` + EnclosedPorch + ScreenPorch + WoodDeckSF
+         #OverallQual_x_OverallCond = OverallQual * OverallCond,
+         #YearBuilt_x_OverallQual = YearBuilt * OverallQual,
+         #YearBuilt_x_OverallCond = YearBuilt * OverallCond) 
+         )%>% 
   mutate(TotalArea2 = TotalArea^2,
          OverallQual2 = OverallQual^2)
 ```
@@ -462,9 +463,9 @@ all_dat['TotalArea'] = all_dat['1stFlrSF'] + all_dat['2ndFlrSF'] + all_dat['Tota
 all_dat['AvgRmSF'] = all_dat['GrLivArea'] / all_dat['TotRmsAbvGrd']
 all_dat['TotalBaths'] = all_dat['FullBath'] + (all_dat['HalfBath'] * 0.5) + all_dat['BsmtFullBath'] + (all_dat['BsmtHalfBath'] * 0.5)
 all_dat['OutsideArea'] = all_dat['OpenPorchSF'] + all_dat['3SsnPorch'] + all_dat['EnclosedPorch'] + all_dat['ScreenPorch'] + all_dat['WoodDeckSF']
-all_dat['OverallQual_x_OverallCond'] = all_dat['OverallQual'] * all_dat['OverallCond']
-all_dat['YearBuilt_x_OverallQual'] = all_dat['OverallQual'] * all_dat['YearBuilt']
-all_dat['YearBuilt_x_OverallCond'] = all_dat['OverallCond'] * all_dat['YearBuilt']
+#all_dat['OverallQual_x_OverallCond'] = all_dat['OverallQual'] * all_dat['OverallCond']
+#all_dat['YearBuilt_x_OverallQual'] = all_dat['OverallQual'] * all_dat['YearBuilt']
+#all_dat['YearBuilt_x_OverallCond'] = all_dat['OverallCond'] * all_dat['YearBuilt']
 all_dat['TotalArea2'] = all_dat['TotalArea']**2
 all_dat['OverallQual2'] = all_dat['OverallQual']**2
 
@@ -645,7 +646,7 @@ Great, ready to start modeling!
 
 The first thing I will do is split the training data into another pair of training and testing. I will fit each model on the training data and evaluate it on the testing data. I need to subset the `all_dat` data frame to include only the values in the initial training data set and then split into a training and testing set using a 70/30 split. There are many ways to do this here by hand, but there are also a few packages that have functions to accomplish this. I'm particularly fond of [`initial_split()`](https://tidymodels.github.io/rsample/reference/initial_split.html) from the `{rsample}` package that is part of the `{tidymodels}` ecosystem. I'm going to use the `{tidyverse}` ecosystem to tune and model, so I'll using `{rsample}` here. The `initial_split()` function creates a training and testing set that are called using `training()` and `testing()`. I will further use cross-validation to for model selection. The `vfold_cv()` function creates an n-fold cross-validation split in the data set. Here, we use it on the training split of the training data.
 ```{r}
-train_dat <- all_dat %>% slice(1:nrow(train))
+train_dat <- all_dat %>% slice(1:nrow(train)) %>% janitor::clean_names()
 
 # Add the log of the target back to the training data for modeling
 train_dat[["SalePrice"]] <- log(train[["SalePrice"]])
@@ -731,14 +732,11 @@ testing(train_split) %>%
   {glue("For the LASSO model in R, the RMSE is {round(., 4)}")}
 ```
 
-
+Now, in Python, using the same hyperparameters. I 
 ```{python}
 from sklearn.metrics import mean_squared_error, make_scorer
 from sklearn.linear_model import LassoCV, ElasticNetCV
-from sklearn.model_selection import KFold
-from sklearn.model_selection import cross_val_score
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import RobustScaler
+from sklearn.model_selection import KFold, GridSearchCV, cross_val_score
 
 K = 5
 kf = KFold(n_splits=K, shuffle=True, random_state=1491)
@@ -747,21 +745,17 @@ def rmse(y_train, y_pred):
     return np.sqrt(mean_squared_error(y_train, y_pred))
 
 alphas = r.alphas_py
-alphas
-lasso = make_pipeline(RobustScaler(), LassoCV(max_iter=1e7, 
-                                              alphas=alphas,
-                                              random_state=1491, 
-                                              cv=5,
-                                              n_jobs=-1,
-                                              normalize=True))
+
+lasso = LassoCV(max_iter=1e7, 
+                alphas=alphas, 
+                random_state=1491, 
+                cv=5,
+                n_jobs=-1,
+                normalize=True)
 
 lasso.fit(X_train, y_train)
 lasso_pred = lasso.predict(X_test)
 print("For the LASSO model in Python, the RMSE is {}".format(rmse(y_test, lasso_pred).round(4)))
-```
-
-```{python}
-X_train
 ```
 
 ## Elastic net model
@@ -775,8 +769,8 @@ en_model <-
                standardize = TRUE)
 
 en_grid <- grid_regular(penalty(range = c(-5, 0)), mixture(), levels = 5)
-alphas_py <- en_grid %>% pull(penalty)
-l1 <- en_grid %>% pull(mixture)
+alphas_py <- en_grid %>% pull(penalty) %>% unique() %>% round(5)
+l1 <- en_grid %>% pull(mixture) %>% unique()  
 
 en_cv <-
     tune_grid(
@@ -813,16 +807,151 @@ testing(train_split) %>%
 ```
 
 ```{python}
-alphas = r.alphas_py
-l1 = r.l1
+#alphas = r.alphas_py
+#l1 = r.l1
+alphas = [0.00001, 0.00018, 0.00316, 0.05623, 1.00000]
+l1 = [0.8, 0.85, 0.9, 0.95, 0.99, 1]
 
-elasticnet = make_pipeline(RobustScaler(), ElasticNetCV(max_iter=1e7, 
-                                                        alphas=alphas, 
-                                                        cv=5, 
-                                                        l1_ratio=l1))
+elasticnet = ElasticNetCV(max_iter=1e7, 
+                          alphas=alphas, 
+                          l1_ratio=l1,
+                          cv=5)
                                                         
 elasticnet.fit(X_train, y_train)
 elasticnet_pred = elasticnet.predict(X_test)
 print("For the Elastic Net model in Python, the RMSE is {}".format(rmse(y_test, elasticnet_pred).round(4)))
+```
+
+## SVM
+
+```{r}
+svm_model <-
+  svm_poly(
+    mode = "regression",
+    scale_factor = tune(),
+    cost = tune()
+  ) %>%
+  set_engine("kernlab",
+             scaled = FALSE)
+
+svm_grid <-
+  grid_regular(
+    scale_factor(),
+    cost(),
+    levels = 5
+  )
+
+scale_py <- svm_grid %>% pull(scale_factor) %>% unique()
+cost_py <- svm_grid %>% pull(cost) %>% unique()
+
+svm_tune <-
+  tune_grid(
+    formula   = SalePrice ~ .,
+    model     = svm_model,
+    resamples = train_cv,
+    grid      = svm_grid,
+    metrics   = metric_set(rmse),
+    control   = control_grid(verbose = FALSE)
+  )
+
+best_svm <-
+  svm_tune %>%
+  select_best("rmse", maximize = FALSE)
+
+print(best_svm)
+
+svm_fit <-
+  svm_model %>%
+  finalize_model(parameters = best_svm) %>%
+  fit(SalePrice ~ ., training(train_split))
+
+svm_predictions <-
+  testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(
+    predict(svm_fit, testing(train_split))
+  )
+
+testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(svm_predictions) %>%
+  rmse(SalePrice, .pred) %>% 
+  pull(.estimate) %>% 
+  {glue("For the SVM model in R, the RMSE is {round(., 4)}")}
+```
+
+```{python}
+np.logspace(-2, 2, 5)
+print([1e0, 1e1, 1e2, 1e3])
+```
+
+```{python}
+from sklearn.svm import SVR
+
+#svr = GridSearchCV(SVR(kernel='poly', gamma=0.1),
+#                   param_grid={"C": [1e0, 1e1, 1e2, 1e3],
+#                               "gamma": np.logspace(-2, 2, 5)})
+   
+svr = SVR(kernel='poly', C= 20, gamma=0.001)                            
+svr.fit(X_train, y_train)
+svr_pred = svr.predict(X_test)
+print("For the SVR model in Python, the RMSE is {}".format(rmse(y_test, svr_pred).round(4)))
+```
+
+
+## Random forest
+
+```{r}
+rf_model <-
+  rand_forest(
+    mode = "regression",
+    mtry = tune(),
+    trees = tune(),
+    min_n = tune()
+    ) %>% 
+  set_engine("ranger")
+
+rf_grid <-
+  grid_regular(
+    mtry(c(1, 15)),
+    trees(c(100, 2000)),
+    min_n(),
+    levels = 1
+  )
+
+rf_tune <-
+  tune_grid(
+    formula   = SalePrice ~ .,
+    model     = rf_model,
+    resamples = train_cv,
+    grid      = rf_grid,
+    metrics   = metric_set(rmse),
+    control   = control_grid(verbose = FALSE)
+  )
+
+best_rf <-
+  rf_tune %>%
+  select_best("rmse", maximize = FALSE)
+
+print(best_rf)
+
+rf_fit <-
+  rf_model %>%
+  finalize_model(parameters = best_rf) %>%
+  fit(SalePrice ~ ., training(train_split))
+
+rf_predictions <-
+  testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(
+    predict(rf_fit, testing(train_split))
+  )
+
+testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(rf_predictions) %>%
+  rmse(SalePrice, .pred) %>% 
+  pull(.estimate) %>% 
+  {glue("For the Random Forest model in R, the RMSE is {round(., 4)}")}
 ```
 
