@@ -216,7 +216,7 @@ Again, in Python, looking at the plots side by side.
 ```{python}
 y = train['SalePrice']
 
-fig, ax = plt.subplots(1, 2, sharey=False, sharex=False)
+fig, ax = plt.subplots(1, 2, sharey=False, sharex=False, figsize=(10,6))
 sns.distplot(y, ax=ax[0]).set(title='Density of Sale Price')
 sns.distplot(np.log(y), ax=ax[1]).set(title='Density of Logged Sale Price')
 ```
@@ -247,7 +247,7 @@ p1 + p2
 
 In Python, we can use `{matplotlib}` to see this relationship.
 ```{python}
-fig, ax = plt.subplots(1, 2, sharey=False, sharex=False)
+fig, ax = plt.subplots(1, 2, sharey=False, sharex=False, figsize=(10,6))
 ax[0].scatter(train['GrLivArea'], train['SalePrice'], alpha = 0.75, color = '#6495ED')
 ax[0].set_title('Sale Price \nby Above Ground Living Area')
 ax[1].scatter(train['GrLivArea'], np.log(train['SalePrice']), alpha = 0.75, color = '#6495ED')
@@ -295,7 +295,7 @@ p1 + p2
 
 For my Python version, I will use `{seaborn}` rather than straight `{matplotlib}` to easily color the points by category.
 ```{python}
-fig, ax = plt.subplots(1, 2, sharey=False, sharex=False)
+fig, ax = plt.subplots(1, 2, sharey=False, sharex=False, figsize=(10,6))
 sns.scatterplot('GrLivArea', 'SalePrice', hue='OverallQual', data=train, palette='viridis', ax=ax[0], alpha=0.75)
 ax[0].set_title('Sale Price \nby Above Ground Living Area')
 ax[0].set_ylabel('Sale Price')
@@ -432,12 +432,12 @@ all_dat['LotFrontage'] = all_dat.groupby(['Neighborhood'])['LotFrontage'].apply(
 
 Now, we should have NO missing values in our data!
 ```{r}
-sum(is.na(all_dat))
+glue("There are {sum(is.na(all_dat))} features with missing observations")
 ```
 
 ```{python}
 missing = all_dat.apply(lambda x: x.isnull().sum()) > 0
-print(missing.sum())
+print('There are {} features with missing observations'.format(missing.sum()))
 ```
 
 # Feature engineering
@@ -631,12 +631,12 @@ print('Lambda value for LowQualFinSF in Python is: %f' % lam)
 
 Double-check that there are no missing observations about all this feature engineering.
 ```{r}
-sum(is.na(all_dat))
+glue("There are {sum(is.na(all_dat))} features with missing observatoins")
 ```
 
 ```{python}
 missing = all_dat.apply(lambda x: x.isnull().sum()) > 0
-print(missing.sum())
+print('There are {} features with missing observations'.format(missing.sum()))
 ```
 
 
@@ -695,7 +695,7 @@ lasso_model <-
     set_engine("glmnet",
                standardize = TRUE)
 
-alphas <- grid_regular(penalty(range = c(-5, 0)), levels = 10)
+alphas <- grid_regular(penalty(range = c(-5, 0)), levels = 25)
 alphas_py <- alphas %>% pull(penalty)
 
 lasso_cv <-
@@ -732,10 +732,12 @@ testing(train_split) %>%
   {glue("For the LASSO model in R, the RMSE is {round(., 4)}")}
 ```
 
-Now, in Python, using the same hyperparameters. I 
+
+
+Now, in Python, using the same hyperparameters. 
 ```{python}
-from sklearn.metrics import mean_squared_error, make_scorer
-from sklearn.linear_model import LassoCV, ElasticNetCV
+from sklearn.metrics import mean_squared_error
+from sklearn.linear_model import LassoCV, RidgeCV, ElasticNetCV
 from sklearn.model_selection import KFold, GridSearchCV, cross_val_score
 
 K = 5
@@ -758,8 +760,67 @@ lasso_pred = lasso.predict(X_test)
 print("For the LASSO model in Python, the RMSE is {}".format(rmse(y_test, lasso_pred).round(4)))
 ```
 
-## Elastic net model
 
+## Ridge model
+```{r}
+ridge_model <-
+    linear_reg(
+        penalty = tune(),
+        mixture = 0) %>%
+    set_engine("glmnet",
+               standardize = TRUE)
+
+alphas <- grid_regular(penalty(range = c(-5, 0)), levels = 25)
+alphas_py <- alphas %>% pull(penalty)
+
+ridge_cv <-
+    tune_grid(
+        formula = SalePrice ~ .,
+        model = ridge_model,
+        resamples = train_cv,
+        grid = alphas,
+        metrics = metric_set(rmse),
+        control = control_grid(verbose = FALSE)
+    )
+
+best_ridge <-
+    ridge_cv %>%
+    select_best("rmse", maximize = FALSE)
+
+print(best_ridge)
+
+best_ridge_model <-
+    ridge_model %>%
+    finalize_model(parameters = best_ridge)
+
+ridge_fit <-
+    best_ridge_model %>%
+    fit(SalePrice ~ ., training(train_split))
+
+ridge_predictions <- predict(ridge_fit, testing(train_split))
+
+testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(ridge_predictions) %>%
+  rmse(SalePrice, .pred) %>% 
+  pull(.estimate) %>% 
+  {glue("For the ridge model in R, the RMSE is {round(., 4)}")}
+```
+
+```{python}
+from sklearn.linear_model import RidgeCV
+alphas = r.alphas_py
+
+ridge = RidgeCV(alphas=alphas, 
+                cv=5,
+                normalize=True)
+
+ridge.fit(X_train, y_train)
+ridge_pred = ridge.predict(X_test)
+print("For the Ridge model in Python, the RMSE is {}".format(rmse(y_test, ridge_pred).round(4)))
+```
+
+## Elastic net model
 ```{r}
 en_model <-
     linear_reg(
@@ -822,8 +883,216 @@ elasticnet_pred = elasticnet.predict(X_test)
 print("For the Elastic Net model in Python, the RMSE is {}".format(rmse(y_test, elasticnet_pred).round(4)))
 ```
 
-## SVM
 
+
+## XGBoost
+```{r}
+
+# R Parsnip to Python translator:
+# sample_size = subsample
+# loss_reduction = gamma
+# trees = n_estimators
+# tree_depth = max_depth
+# min_n = min_child_weight
+# mtry = colsample_bytree
+
+#xgb_model <-
+#  boost_tree(
+#    mode = "regression",
+#    trees = tune(),
+#    learn_rate = tune(),
+#    min_n = tune(),
+#    tree_depth = tune()
+#  ) %>%
+#  set_engine(
+#    "xgboost",
+#    booster = "gbtree"
+#  )
+#
+#xgb_grid <-
+#    grid_regular(
+#        trees(c(100, 1000)),
+#        learn_rate(c(-4, 0)),
+#        min_n(c(2, 10)),
+#        tree_depth(c(2, 8)),
+#        levels = 3
+#    )
+#
+#learn_rate_py <- xgb_grid %>% pull(learn_rate) %>% unique()
+#min_n_py <- xgb_grid %>% pull(min_n) %>% unique()
+#tree_depth_py <- xgb_grid %>% pull(tree_depth) %>% unique()
+#
+#xgb_tune <-
+#  tune_grid(
+#    formula   = SalePrice ~ .,
+#    model     = xgb_model,
+#    resamples = train_cv,
+#    grid      = xgb_grid,
+#    metrics   = metric_set(rmse),
+#    control   = control_grid(verbose = TRUE)
+#  )
+#
+#best_xgb <-
+#  xgb_tune %>%
+#  select_best("rmse", maximize = FALSE)
+#
+#print(best_xgb)
+#
+#xgb_fit <-
+#  xgb_model %>%
+#  finalize_model(parameters = best_xgb) %>%
+#  fit(SalePrice ~ ., training(train_split))
+
+xgb_model <-
+  boost_tree(
+    mode = "regression",
+    trees = 2000,
+    sample_size = 0.5,
+    mtry = 1,
+    loss_reduction = 0.001,
+    learn_rate = 0.01,
+    min_n = 10,
+    tree_depth = 5
+  ) %>%
+  set_engine(
+    "xgboost",
+    booster = "gbtree"
+  )
+
+xgb_fit <-
+  xgb_model %>%
+  fit(SalePrice ~ ., training(train_split))
+
+xgb_predictions <-
+  testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(
+    predict(xgb_fit, testing(train_split))
+  )
+
+testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(xgb_predictions) %>%
+  rmse(SalePrice, .pred) %>% 
+  pull(.estimate) %>% 
+  {glue("For the XGBoost model in R, the RMSE is {round(., 4)}")}
+```
+
+
+
+```{python}
+from xgboost import XGBRegressor
+
+xgb = XGBRegressor(booster='gbtree',
+                   objective='reg:squarederror',
+                   eta = 0.01,
+                   subsample=0.5,
+                   gamma = 0,
+                   n_estimators=2000,
+                   colsample_bytree=1,
+                   max_depth=5, 
+                   min_child_weight=10, 
+                   random_state=1491)
+
+xgb_model = xgb.fit(X_train, y_train)
+xgb_pred = xgb_model.predict(X_test)
+print("For the XGBoost model in Python, the RMSE is {}".format(rmse(y_test, xgb_pred).round(4)))
+```
+
+```{r}
+mars_model <-
+  mars(
+    mode = "regression",
+    prod_degree = tune(),
+    prune_method = tune()
+  ) %>%
+  set_engine("earth")
+
+mars_grid <-
+    grid_regular(
+        prod_degree(),
+        prune_method(c('backward', 'none', 'exhaustive', 'forward', 'seqrep')),
+        levels = 5
+    )
+
+mars_tune <-
+  tune_grid(
+    formula   = SalePrice ~ .,
+    model     = mars_model,
+    resamples = train_cv,
+    grid      = mars_grid,
+    metrics   = metric_set(rmse),
+    control   = control_grid(verbose = FALSE)
+  )
+
+best_mars <-
+  mars_tune %>%
+  select_best("rmse", maximize = FALSE)
+
+print(best_mars)
+
+mars_fit <-
+  mars_model %>%
+  finalize_model(parameters = best_mars) %>%
+  fit(SalePrice ~ ., training(train_split))
+
+mars_predictions <-
+  testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(
+    predict(mars_fit, testing(train_split))
+  )
+
+testing(train_split) %>%
+  select(SalePrice) %>%
+  bind_cols(mars_predictions) %>%
+  rmse(SalePrice, .pred) %>% 
+  pull(.estimate) %>% 
+  {glue("For the MARS model in R, the RMSE is {round(., 4)}")}
+```
+
+```{python}
+from pyearth import Earth
+
+mars_model = Earth(max_degree = 1, enable_pruning=False)
+mars_model.fit(X_train, y_train)
+
+mars_pred = mars_model.predict(X_test)
+print("For the MARS model in Python, the RMSE is {}".format(rmse(y_test, mars_pred).round(4)))
+```
+
+# Averaging models for the final predication
+```{r}
+preds <- list(lasso_predictions, ridge_predictions, en_predictions, xgb_predictions, mars_predictions)
+names(preds) <- c("LASSO", "Ridge", "Elastic Net", "XGBoost", "MARS")
+
+imap_chr(preds, ~ testing(train_split) %>% 
+             select(SalePrice) %>%
+             bind_cols(.x) %>%
+             rmse(SalePrice, .pred) %>% 
+             pull(.estimate) %>% 
+             {glue("For the {.y} model in R, the RMSE is {round(., 4)}")})
+
+all_pred <- imap(preds, ~ .x %>% pull(.pred))
+
+weighted_pred <- (all_pred$LASSO * 0.2) + (all_pred$Ridge * 0.1) + (all_pred$`Elastic Net` * 0.2) + (all_pred$XGBoost * 0.1) + (all_pred$MARS * 0.4)
+
+rmse_vec(testing(train_split)[["SalePrice"]], weighted_pred) %>% 
+    {glue("For the averaged model, the RMSE is {round(., 4)}")}
+```
+
+```{python}
+blended_pred = ((0.2 * lasso.predict(X_test)) + (0.1 * ridge.predict(X_test)) + (0.2 * elasticnet.predict(X_test)) + (0.1 * xgb_gs.predict(X_test)) + (0.4 * mars_model.predict(X_test)))
+            
+print("For the averaged model, the RMSE is {}".format(rmse(y_test, blended_pred).round(4)))
+```
+
+
+
+
+
+
+## SVM
 ```{r}
 svm_model <-
   svm_poly(
@@ -880,10 +1149,6 @@ testing(train_split) %>%
   {glue("For the SVM model in R, the RMSE is {round(., 4)}")}
 ```
 
-```{python}
-np.logspace(-2, 2, 5)
-print([1e0, 1e1, 1e2, 1e3])
-```
 
 ```{python}
 from sklearn.svm import SVR
@@ -897,61 +1162,3 @@ svr.fit(X_train, y_train)
 svr_pred = svr.predict(X_test)
 print("For the SVR model in Python, the RMSE is {}".format(rmse(y_test, svr_pred).round(4)))
 ```
-
-
-## Random forest
-
-```{r}
-rf_model <-
-  rand_forest(
-    mode = "regression",
-    mtry = tune(),
-    trees = tune(),
-    min_n = tune()
-    ) %>% 
-  set_engine("ranger")
-
-rf_grid <-
-  grid_regular(
-    mtry(c(1, 15)),
-    trees(c(100, 2000)),
-    min_n(),
-    levels = 1
-  )
-
-rf_tune <-
-  tune_grid(
-    formula   = SalePrice ~ .,
-    model     = rf_model,
-    resamples = train_cv,
-    grid      = rf_grid,
-    metrics   = metric_set(rmse),
-    control   = control_grid(verbose = FALSE)
-  )
-
-best_rf <-
-  rf_tune %>%
-  select_best("rmse", maximize = FALSE)
-
-print(best_rf)
-
-rf_fit <-
-  rf_model %>%
-  finalize_model(parameters = best_rf) %>%
-  fit(SalePrice ~ ., training(train_split))
-
-rf_predictions <-
-  testing(train_split) %>%
-  select(SalePrice) %>%
-  bind_cols(
-    predict(rf_fit, testing(train_split))
-  )
-
-testing(train_split) %>%
-  select(SalePrice) %>%
-  bind_cols(rf_predictions) %>%
-  rmse(SalePrice, .pred) %>% 
-  pull(.estimate) %>% 
-  {glue("For the Random Forest model in R, the RMSE is {round(., 4)}")}
-```
-
