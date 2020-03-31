@@ -1082,7 +1082,10 @@ rmse_vec(testing(train_split)[["SalePrice"]], weighted_pred) %>%
 ```
 
 ```{python}
-blended_pred = ((0.2 * lasso.predict(X_test)) + (0.1 * ridge.predict(X_test)) + (0.2 * elasticnet.predict(X_test)) + (0.1 * xgb_gs.predict(X_test)) + (0.4 * mars_model.predict(X_test)))
+for name, model in zip(['Lasso', 'Ridge', 'Elastic Net', 'XGBosst', 'MARS'], [lasso, ridge, elasticnet, xgb_gs, mars_model]):
+  print("For the {} model in Python, the RMSE is {}".format(name, rmse(y_test, model.predict(X_test)).round(4)))
+
+blended_pred = ((0.2 * lasso.predict(X_test)) + (0.1 * ridge.predict(X_test)) + (0.3 * elasticnet.predict(X_test)) + (0.1 * xgb_gs.predict(X_test)) + (0.3 * mars_model.predict(X_test)))
             
 print("For the averaged model, the RMSE is {}".format(rmse(y_test, blended_pred).round(4)))
 ```
