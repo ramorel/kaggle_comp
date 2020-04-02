@@ -4,6 +4,7 @@ author: "Richard Paquin Morel"
 date: "1/22/2020"
 output:
   html_document:
+    keep_md: true
     number_sections: true
     toc: true
     toc_depth: 2
@@ -11,9 +12,32 @@ output:
     highlight: zenburn
 ---
 
-# Introduction and prep
+# Introduction
 
-First 
+R and Python are both great for statistical programming, but have their relative strengths and weaknesses. I will sum these differences up, poorly, as: R is generally better at inferential statistics, Python is generally better at predictive statistics--and machine learning more specifically. As a summary statement and generalization, that is both helpful and wrong. But gives the general idea.
+
+I thought it would be fun, as an exercise, to do a side-by-side, nose-to-tail analysis in both R and Python, taking advantage of the wonderful [`{reticulate}`](https://rstudio.github.io/reticulate/) package in R. `{reticulate}` allows one to access Python through the R interface. I find this especially cool in Rmarkdown, since you can knit R and Python chucks in the same document! You can, to some extent, pass objects back and forth between the R and Python environments. Wow. 
+
+So given this affordance, I analyze the Ames Housing dataset with the goal of predicting housing prices, a la [this Kaggle competition](https://www.kaggle.com/c/house-prices-advanced-regression-techniques).
+
+I abide by a few rule:
+
+- Be explicit as possible in both languages
+- Use a few packages/libraries as possible
+- Level playing field--e.g., use the same values for tuning parameters
+- Try to replicate the analysis as closely as possible in each language
+- Avoid any sort of evaluative comparison
+
+_Important note._ I primarily use R and have much more experience with R than Python. So bear that in mind.
+
+Let the fun begin.
+
+![](/Users/richardmorel/Documents/GitHub/good_time_fun_time/files/it_begins.gif)
+
+# Importing the libraries
+
+Now, I know I just said that I will use as few libraries as possible--but I will do the R end of this in the `{tidyverse}` idiom. I will also take a few things from the `{tidymodels}` suite of packages. I do this because `{tidymodels}` is the successor to one of the main machine learning packages in R, `{caret}`.
+
 ```{r setup, include=FALSE}
 knitr::opts_chunk$set(echo = TRUE)
 
@@ -38,21 +62,19 @@ theme_set(
 library(reticulate)
 ```
 
-Import python libraries
+For Python, I use the usual suspects: `{pandas}`, `{numpy}` and `{scipy}`, and `{matplotlib}` for visualizations. I also import `{seaborn}`, again violating my rules, but `{seaborn}` makes it easy to color visualizations by groups, like in `{ggplot2}`.
 ```{python}
 import pandas as pd
 import numpy as np
 from scipy.stats import skew
 import seaborn as sns
 import matplotlib.pyplot as plt
-
-from scipy import stats
-from scipy.stats import pearsonr
 ```
 
 ## Importing the data
 
-First, we import the training and testing data. I will do this in python. To call up python objects in R, we use `py$object`. 
+The cool thing about `{reticulate}` is that it allows you to access objects from either environment. To access a Python object, you use the syntax `r.object` and in R you use `py$object`. So in this case, I will import using Python and then call the objects over to the R environment. 
+This causes an interesting data issue and serves as a good reminder to always check out your data before plunging ahead with analysis. 
 ```{python}
 train = pd.read_csv('train.csv')
 test = pd.read_csv('test.csv')
@@ -61,7 +83,7 @@ test = pd.read_csv('test.csv')
 ids = test['Id']
 ```
 
-I'll assign the python objects to the R environment. Since the objects live in different places, 
+Using the syntax just described, I will assign the objects in R.
 ```{r}
 train <- py$train
 test <- py$test
